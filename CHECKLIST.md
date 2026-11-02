@@ -32,8 +32,8 @@ and behaves per spec. Work top-to-bottom; do not skip ahead.
 - [x] Per-weapon ammo state, reload (`reloadTime * 600` ms refill)
 - [x] Reload-cancel with Fists works on all weapons incl. Sniper/Shotgun/
   Burst Rifle/Assault Rifle
-- [ ] Per-weapon damage falloff uses actual hit distance (currently distance 0)
-- [ ] Headshot multipliers / crit values per weapon
+- [x] Per-weapon damage falloff uses actual hit distance (client + server)
+- [x] Headshot multipliers / crit values per weapon (head zone = above 75% target height; crit.start or critMult ×2)
 - [ ] Katana bullet deflection (timed)
 - [ ] Scythe dash-in melee
 - [ ] Spear throw / pin to wall / launch pad

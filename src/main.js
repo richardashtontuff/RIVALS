@@ -182,7 +182,7 @@ function connect() {
         break;
       case 'hit_confirmed':
         showHitmarker();
-        infoEl.textContent = `hit ${msg.targetId.slice(0,4)} for ${msg.damage}`;
+        infoEl.textContent = `${msg.headshot ? 'HEADSHOT ' : ''}hit ${msg.targetId.slice(0,4)} for ${msg.damage}`;
         break;
       case 'damage_taken':
         C.DEFAULT_HEALTH = Math.max(0, msg.health);
@@ -509,9 +509,18 @@ function fireWeapon() {
 
   // Immediate local hitmarker (spec §7: client registers instantly)
   showHitmarker();
-  if (hitPoint) {
-    const dmg = damageAtRange(w, eye.distanceTo(hitPoint));
+  if (hitPoint && hitObject) {
+    const dist = eye.distanceTo(hitPoint);
+    // Headshot detection vs target head level
+    let targetPos = null;
+    let t = hitObject;
+    while (t && !t.userData.playerId && !t.userData.type) t = t.parent;
+    if (t && t.userData.pos) targetPos = t.userData.pos;
+    else if (t && t.position) targetPos = t.position;
+    const hs = targetPos ? isHeadshotPoint(hitPoint, targetPos) : false;
+    const dmg = damageAtRange(w, dist, hs);
     applyDamage(hitObject, dmg, hitPoint);
+    if (hs) infoEl.textContent = 'HEADSHOT';
   }
 
   // Send to server for authoritative validation (spec §7)
@@ -520,11 +529,25 @@ function fireWeapon() {
   if (w.ammoMag >= 0 && am.mag <= 0) startReload();
 }
 
-function damageAtRange(w, distMeters) {
-  if (w.noFalloff) return w.damage.start;
-  const range = w.range || 100;
-  const t = Math.min(1, distMeters / range);
-  return w.damage.start + (w.damage.end - w.damage.start) * t;
+function damageAtRange(w, distMeters, isHeadshot) {
+  const body = w.noFalloff
+    ? w.damage.start
+    : (() => {
+        const range = w.range || 100;
+        const t = Math.min(1, distMeters / range);
+        return w.damage.start + (w.damage.end - w.damage.start) * t;
+      })();
+  let dmg = body;
+  if (isHeadshot) {
+    if (w.crit) dmg = w.crit.start;
+    else if (w.critMult) dmg = body * w.critMult;
+    else dmg = body * 2;
+  }
+  return Math.max(0, dmg);
+}
+
+function isHeadshotPoint(hitPoint, targetPos, targetHeight = 1.7) {
+  return hitPoint.y > targetPos.y + targetHeight * 0.75;
 }
 
 function applyDamage(obj, dmg, point) {

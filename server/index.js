@@ -81,6 +81,30 @@ function dist3(a, b) {
   return Math.sqrt((a[0]-b[0])**2 + (a[1]-b[1])**2 + (a[2]-b[2])**2);
 }
 
+/** Compute body damage with falloff + headshot crit (spec §4.2 / §4.3).
+ *  Returns { damage, isHeadshot }. Server-authoritative. */
+function computeDamage(w, distMeters, isHeadshot) {
+  const body = w.noFalloff
+    ? w.damage.start
+    : (() => {
+        const range = w.range || 100;
+        const t = Math.min(1, distMeters / range);
+        return w.damage.start + (w.damage.end - w.damage.start) * t;
+      })();
+  let dmg = body;
+  if (isHeadshot) {
+    if (w.crit) dmg = w.crit.start;            // explicit crit damage
+    else if (w.critMult) dmg = body * w.critMult; // multiplier
+    else dmg = body * 2;                        // default 2× headshot
+  }
+  return { damage: Math.max(0, dmg), isHeadshot };
+}
+
+/** Head zone: hit is a headshot if above ~75% of target height. */
+function isHeadshotPoint(hitPoint, targetPos, targetHeight = 1.7) {
+  return hitPoint[1] > targetPos[1] + targetHeight * 0.75;
+}
+
 // ----------------------------------------------------------------- Game state (round machine)
 const scores = new Map(); // playerId -> round wins
 let roundState = ROUND_LOBBY;
@@ -237,14 +261,16 @@ function handleFire(ws, payload) {
     return;
   }
 
-  // Apply authoritative damage
-  const dmg = w.damage ? w.damage.start : C.DEFAULT_HEALTH / 2;
+  // Apply authoritative damage (falloff + headshot)
+  const distMeters = dist3(shooterPos, hitPosition);
+  const headshot = hitTargetId ? isHeadshotPoint(hitPosition, players.get(hitTargetId).pos) : false;
+  const { damage: dmg } = computeDamage(w, distMeters, headshot);
   if (hitTargetId) {
     const target = players.get(hitTargetId);
     if (target && target.alive) {
       target.health = Math.max(0, target.health - dmg);
-      console.log(`[server] ${shooter.id.slice(0,4)} hit ${target.id.slice(0,4)} for ${dmg} → ${target.health}`);
-      ws.send(JSON.stringify({ type: 'hit_confirmed', targetId: hitTargetId, damage: dmg, targetHealth: target.health }));
+      console.log(`[server] ${shooter.id.slice(0,4)} ${headshot?'HEADSHOT ':''}hit ${target.id.slice(0,4)} for ${dmg} → ${target.health} (dist ${distMeters.toFixed(1)}m)`);
+      ws.send(JSON.stringify({ type: 'hit_confirmed', targetId: hitTargetId, damage: dmg, targetHealth: target.health, headshot }));
       const tWs = Array.from(wsServer.clients).find(c => c.playerId === hitTargetId);
       if (tWs && tWs.readyState === WebSocket.OPEN)
         tWs.send(JSON.stringify({ type: 'damage_taken', damage: dmg, health: target.health, attackerId: shooter.id }));
