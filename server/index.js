@@ -27,8 +27,31 @@ const POSITION_HISTORY_MS = 300;
 
 // Round timing (spec §1)
 const ROUND_TIME_S = 180;        // 3 minute rounds
-const INTERMISSION_TIME_S = 8;   // map vote / between rounds
+const INTERMISSION_TIME_S = 15;  // map vote duration
 const MATCH_WIN_SCORE = 5;       // first to 5 round wins
+
+// Map voting (spec §1 / §5)
+let mapVotes = new Map();        // mapName -> count
+let votingPlayers = new Set();   // playerIds who have voted
+const MAP_POOL = ['Arena', 'Backrooms', 'Battleground', 'Bridge', 'Chess',
+  'Construction', 'Crossroads', 'Dimension', 'Docks', 'Graveyard', 'Iceberg',
+  'Museum', 'Onyx', 'Playground', 'Sandbox', 'Station', 'Studio', 'Village',
+  'Westown', 'Shooting Range'];
+
+function resetVotes() {
+  mapVotes = new Map();
+  for (const m of MAP_POOL) mapVotes.set(m, 0);
+  votingPlayers = new Set();
+}
+
+function getWinningMap() {
+  let best = MAP_POOL[0];
+  let bestCount = -1;
+  for (const [m, c] of mapVotes) {
+    if (c > bestCount) { bestCount = c; best = m; }
+  }
+  return best;
+}
 
 // Game modes (spec §2)
 const MODE_DUEL = 'DUEL';        // 1v1-5v5, first to 5 round wins
@@ -157,6 +180,9 @@ function endRound(winnerId) {
   if (currentGameMode === MODE_DUEL && winnerId) {
     ensureScore(winnerId);
     scores.set(winnerId, scores.get(winnerId) + 1);
+    // Key reward for round win (spec §6)
+    const winner = players.get(winnerId);
+    if (winner) winner.keys = (winner.keys || 0) + 2;
   }
   const lb = leaderboard();
   console.log(`[server] ROUND END — mode ${currentGameMode} winner ${winnerId?.slice(0,4)}, scores: ${JSON.stringify(Object.fromEntries(scores))}`);
@@ -185,6 +211,9 @@ function createPlayer(id) {
     lastFireTime: 0,            // for fire-rate validation
     kills: 0, deaths: 0,        // for TDM / FFA scoring
     currentWeapon: 'ASSAULT_RIFLE', // for Gun Game
+    keys: 0,                    // economy currency
+    ownedWeapons: new Set(['ASSAULT_RIFLE', 'HANDGUN', 'FISTS', 'GRENADE']), // starter kit
+    level: 1,
   };
 }
 
@@ -216,7 +245,8 @@ function handleJoin(ws, payload) {
     type: 'joined', playerId: id, spawn: p.pos, health: p.health,
     tickRate: NET.TICK_RATE, roundState, roundTimer,
     scores: Object.fromEntries(scores), matchWinScore: MATCH_WIN_SCORE,
-    currentMap, gameMode: currentGameMode,
+    currentMap, gameMode: currentGameMode, mapPool: MAP_POOL,
+    mapVotes: Object.fromEntries(mapVotes),
   }));
   console.log(`[server] player joined: ${id} (${players.size} total)`);
   // If we have 2 players and in lobby, start a round shortly
@@ -307,6 +337,8 @@ function handleFire(ws, payload) {
         target.health = 0;
         target.deaths += 1;
         shooter.kills += 1;
+        // Key reward for elimination (spec §6)
+        shooter.keys = (shooter.keys || 0) + 1;
         const victimId = target.id;
 
         if (currentGameMode === MODE_DUEL) {
@@ -342,7 +374,11 @@ function simulate() {
   // Round state machine transitions
   if (roundState === ROUND_INTERMISSION) {
     roundTimer -= dt;
-    if (roundTimer <= 0) startRound();
+    if (roundTimer <= 0) {
+      currentMap = getWinningMap();
+      console.log(`[server] Map vote complete: ${currentMap}`);
+      startRound();
+    }
   } else if (roundState === ROUND_ACTIVE) {
     roundTimer -= dt;
     // Apply player movement
@@ -413,12 +449,14 @@ function broadcastSnapshot(wsServer) {
     type: 'snapshot', t: now(), roundState, roundTimer,
     scores: Object.fromEntries(scores), roundWinnerId,
     matchWinScore: MATCH_WIN_SCORE, currentMap, gameMode: currentGameMode,
+    mapPool: MAP_POOL, mapVotes: Object.fromEntries(mapVotes),
     players: [],
   };
   for (const p of players.values()) {
     snapshot.players.push({
       id: p.id, pos: p.pos, yaw: p.yaw, pitch: p.pitch,
       health: p.health, alive: p.alive, kills: p.kills, deaths: p.deaths,
+      keys: p.keys,
     });
   }
   const msg = JSON.stringify(snapshot);
@@ -441,6 +479,16 @@ wsServer.on('connection', (ws) => {
         case 'input': handleInput(ws, msg); break;
         case 'fire': handleFire(ws, msg); break;
         case 'set_mode': currentGameMode = msg.mode || MODE_DUEL; console.log('[server] game mode set to', currentGameMode); break;
+        case 'vote_map':
+          if (roundState === ROUND_INTERMISSION && msg.map) {
+            if (!votingPlayers.has(ws.playerId)) {
+              votingPlayers.add(ws.playerId);
+              const current = mapVotes.get(msg.map) || 0;
+              mapVotes.set(msg.map, current + 1);
+              console.log(`[server] ${ws.playerId.slice(0,4)} voted for ${msg.map}`);
+            }
+          }
+          break;
         default: console.log('[server] unknown message:', msg.type);
       }
     } catch (e) { console.error('[server] bad message:', e.message); }

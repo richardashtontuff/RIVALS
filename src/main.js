@@ -90,6 +90,29 @@ roundUI.appendChild(roundScoreEl);
 roundUI.appendChild(roundMatchEl);
 document.body.appendChild(roundUI);
 
+// Map vote UI (spec §1 / §5) - shown during Intermission
+const mapVoteUI = document.createElement('div');
+mapVoteUI.id = 'mapVoteUI';
+Object.assign(mapVoteUI.style, {
+  position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)',
+  color: '#fff', fontSize: '1.2rem', pointerEvents: 'auto', userSelect: 'none',
+  textShadow: '0 0 10px rgba(0,0,0,0.9)', textAlign: 'center', display: 'none',
+  background: 'rgba(0,0,0,0.7)', padding: '2rem', borderRadius: '8px',
+});
+const mapVoteTitle = document.createElement('div');
+mapVoteTitle.style.fontSize = '1.5rem';
+mapVoteTitle.style.fontWeight = '700';
+mapVoteTitle.style.marginBottom = '1rem';
+mapVoteTitle.textContent = 'MAP VOTE';
+const mapVoteButtons = document.createElement('div');
+mapVoteButtons.style.display = 'flex';
+mapVoteButtons.style.flexWrap = 'wrap';
+mapVoteButtons.style.gap = '0.5rem';
+mapVoteButtons.style.justifyContent = 'center';
+mapVoteUI.appendChild(mapVoteTitle);
+mapVoteUI.appendChild(mapVoteButtons);
+document.body.appendChild(mapVoteUI);
+
 // Flashbang blind overlay
 const blindOverlay = document.createElement('div');
 blindOverlay.id = 'blindOverlay';
@@ -231,11 +254,14 @@ function connect() {
       case 'joined':
         myPlayerId = msg.playerId;
         mc.position.set(msg.spawn[0], msg.spawn[1], msg.spawn[2]);
+        mapPool = msg.mapPool || mapPool;
+        mapVotes = msg.mapVotes || mapVotes;
         netStatus.textContent = `server • id ${myPlayerId.slice(0,4)}`;
         netStatus.style.color = '#44ff44';
         break;
       case 'snapshot':
         onSnapshot(msg);
+        if (msg.keys !== undefined) setKeys(msg.keys);
         break;
       case 'hit_confirmed':
         showHitmarker();
@@ -278,6 +304,11 @@ function onSnapshot(msg) {
   roundWinnerId = msg.roundWinnerId;
   matchWinScore = msg.matchWinScore || 5;
   Object.assign(scores, msg.scores || {});
+  mapPool = msg.mapPool || mapPool;
+  mapVotes = msg.mapVotes || mapVotes;
+  // Update local player keys from snapshot
+  const me = msg.players.find(p => p.id === myPlayerId);
+  if (me && me.keys !== undefined) setKeys(me.keys);
 
   // Apply server-confirmed status effects
   if (msg.effects) {
@@ -662,6 +693,36 @@ const scores = {};
 let matchWinScore = 5;
 let roundWinnerId = null;
 let myAlive = true;
+let mapPool = [];
+let mapVotes = {};
+let hasVoted = false;
+
+// Map vote UI rendering
+function renderMapVote() {
+  mapVoteUI.style.display = roundState === 'ROUND_INTERMISSION' ? 'block' : 'none';
+  if (roundState !== 'ROUND_INTERMISSION') return;
+  mapVoteButtons.innerHTML = '';
+  for (const mapName of mapPool) {
+    const votes = mapVotes[mapName] || 0;
+    const btn = document.createElement('button');
+    btn.textContent = `${mapName} (${votes})`;
+    btn.style.padding = '0.5rem 1rem';
+    btn.style.background = hasVoted ? '#555' : '#444';
+    btn.style.color = '#fff';
+    btn.style.border = '1px solid #777';
+    btn.style.borderRadius = '4px';
+    btn.style.cursor = hasVoted ? 'not-allowed' : 'pointer';
+    btn.disabled = hasVoted;
+    if (!hasVoted) {
+      btn.onclick = () => {
+        socket.send(JSON.stringify({ type: 'vote_map', map: mapName }));
+        hasVoted = true;
+        renderMapVote();
+      };
+    }
+    mapVoteButtons.appendChild(btn);
+  }
+}
 
 function updateRoundUI() {
   roundUI.style.display = 'block';
@@ -760,6 +821,7 @@ let lastInputSend = 0;
 function updateHUD() {
   hpEl.textContent = `HP ${Math.max(0, C.DEFAULT_HEALTH)}`;
   updateSlotsUI();
+  renderMapVote();
 
   // Flashbang overlay (spec §4.6)
   const blindAlpha = weaponSystem.flashbangAlpha(now());
