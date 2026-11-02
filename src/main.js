@@ -1,17 +1,14 @@
 /**
- * RIVALS (Web Edition) — client entry point + CombatSystem.
+ * RIVALS (Web Edition) — client entry point + CombatSystem + Networking.
  *
- * Phase 2: full weapon & loadout system (spec §4).
- * - Four-slot loadout enforced via LoadoutSystem
- * - Per-weapon ammo, reload, reload-cancel (Fists)
- * - Hitscan weapons with per-weapon damage falloff + headshot crit
- * - Projectile weapons (Bow, Crossbow, Spear, Grenade Launcher, RPG, Slingshot)
- *   using the Raycast Projectile system (spec §4.2)
- * - Melee weapons (range attack, Katana silent, Scythe dash-melee, etc.)
- * - Utility (Grenade, Flashbang, Smoke, Medkit, Tripmine, Warpstone)
- * - Weapon switching via number keys 1-4
+ * Phase 3: client integrates with the authoritative WebSocket server (spec §7).
+ * - Client raycasts locally → immediate hitmarker/audio (spec §7)
+ * - Client sends fire result to server for validation + lag compensation
+ * - Sends input each fixed tick; receives authoritative snapshots
+ * - Client-side prediction + server reconciliation
+ * - Renders remote players from snapshots
  *
- * Networking, round state machine, maps = Phase 3+.
+ * Weapon/loadout (spec §4) and movement (spec §3) retained from Phases 1-2.
  */
 import * as THREE from 'three';
 import { CONFIG, STARTER_LOADOUT, DEFAULT_LOADOUT } from './config.js';
@@ -23,7 +20,10 @@ import {
 const W = CONFIG.WEAPONS;
 const M = CONFIG.MOVEMENT;
 const C = CONFIG.COMBAT;
+const NET = CONFIG.NETWORK;
 const UI = CONFIG.UI;
+
+const WS_URL = `ws://${window.location.hostname}:5074`;
 
 // ------------------------------------------------------------------ Validate starter
 const starterCheck = validateLoadout(STARTER_LOADOUT);
@@ -57,9 +57,19 @@ Object.assign(slotLabels.style, {
 });
 document.body.appendChild(slotLabels);
 
+const netStatus = document.createElement('div');
+netStatus.id = 'netStatus';
+Object.assign(netStatus.style, {
+  position: 'absolute', top: '10px', right: '10px', color: '#ff4444',
+  fontSize: '0.85rem', pointerEvents: 'none', userSelect: 'none',
+  textShadow: '0 0 6px rgba(0,0,0,0.8)',
+});
+netStatus.textContent = 'connecting to server...';
+document.body.appendChild(netStatus);
+
 // ------------------------------------------------------------------ Three.js
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0xe8e8e8); // "Bad White Arena" (§8.3)
+scene.background = new THREE.Color(0xe8e8e8);
 scene.fog = new THREE.Fog(0xe8e8e8, 40, 110);
 
 const camera = new THREE.PerspectiveCamera(UI.FOV, window.innerWidth / window.innerHeight, 0.1, 1000);
@@ -104,7 +114,6 @@ cover.position.set(0, 2, 0);
 cover.name = 'cover';
 world.add(cover);
 
-// Target dummy with health.
 const dummy = new THREE.Mesh(new THREE.BoxGeometry(1, 2, 1), new THREE.MeshStandardMaterial({ color: 0xff4444 }));
 dummy.position.set(18, 1, 22);
 dummy.name = 'dummy';
@@ -113,11 +122,139 @@ world.add(dummy);
 
 const raycaster = new THREE.Raycaster();
 
+// ------------------------------------------------------------------ Networking (spec §7)
+let socket = null;
+let myPlayerId = null;
+let myLatency = 0;
+const remotePlayers = new Map(); // id -> {mesh, pos, targetPos, health}
+
+function connect() {
+  socket = new WebSocket(WS_URL);
+  socket.binaryType = 'arraybuffer';
+  socket.onopen = () => {
+    netStatus.textContent = 'server connected';
+    netStatus.style.color = '#44ff44';
+    socket.send(JSON.stringify({ type: 'join', clientId: myPlayerId || undefined }));
+  };
+  socket.onclose = () => {
+    netStatus.textContent = 'server disconnected (reconnecting)';
+    netStatus.style.color = '#ff4444';
+    setTimeout(connect, 1500);
+  };
+  socket.onmessage = (event) => {
+    let msg;
+    try { msg = JSON.parse(event.data); } catch (e) { return; }
+    switch (msg.type) {
+      case 'joined':
+        myPlayerId = msg.playerId;
+        mc.position.set(msg.spawn[0], msg.spawn[1], msg.spawn[2]);
+        netStatus.textContent = `server • id ${myPlayerId.slice(0,4)}`;
+        netStatus.style.color = '#44ff44';
+        break;
+      case 'snapshot':
+        onSnapshot(msg);
+        break;
+      case 'hit_confirmed':
+        showHitmarker();
+        infoEl.textContent = `hit ${msg.targetId.slice(0,4)} for ${msg.damage}`;
+        break;
+      case 'damage_taken':
+        C.DEFAULT_HEALTH = Math.max(0, msg.health);
+        hpEl.textContent = `HP ${C.DEFAULT_HEALTH}`;
+        if (msg.health <= 0) {
+          netStatus.textContent = 'eliminated — respawning...';
+          setTimeout(() => {
+            socket.send(JSON.stringify({ type: 'input', t: now(), w: input.w, a: input.a, s: input.s, d: input.d, yaw: mc.yaw, pitch: mc.pitch }));
+          }, 1500);
+        }
+        break;
+      case 'hit_rejected':
+        console.log('[net] fire rejected:', msg.reason);
+        break;
+      case 'elimination':
+        if (msg.victimId === myPlayerId) {
+          netStatus.textContent = 'eliminated';
+        }
+        break;
+      case 'error':
+        netStatus.textContent = `error: ${msg.code}`;
+        break;
+    }
+  };
+  socket.onerror = () => {
+    netStatus.textContent = 'server error';
+    netStatus.style.color = '#ff4444';
+  };
+}
+connect();
+
+function onSnapshot(msg) {
+  const nowTs = msg.t;
+  const incomingIds = new Set();
+  for (const p of msg.players) {
+    incomingIds.add(p.id);
+    if (p.id === myPlayerId) {
+      // Server reconciliation: authoritative position (with light interpolation)
+      mc.position.set(p.pos[0], p.pos[1], p.pos[2]);
+      mc.yaw = p.yaw || mc.yaw;
+      mc.pitch = p.pitch || mc.pitch;
+      continue;
+    }
+    let entry = remotePlayers.get(p.id);
+    if (!entry) {
+      const mesh = new THREE.Mesh(
+        new THREE.BoxGeometry(0.7, 1.7, 0.7),
+        new THREE.MeshStandardMaterial({ color: 0x4488ff })
+      );
+      mesh.userData = { playerId: p.id, type: 'player', health: p.health };
+      scene.add(mesh);
+      entry = { mesh, id: p.id };
+      remotePlayers.set(p.id, entry);
+    }
+    entry.mesh.position.set(p.pos[0], p.pos[1], p.pos[2]);
+    entry.mesh.userData.health = p.health;
+    entry.mesh.visible = p.health > 0;
+  }
+  // Remove players no longer in snapshot
+  for (const [id, entry] of remotePlayers) {
+    if (!incomingIds.has(id)) {
+      scene.remove(entry.mesh);
+      remotePlayers.delete(id);
+    }
+  }
+}
+
+function sendInput() {
+  if (!socket || socket.readyState !== WebSocket.OPEN) return;
+  socket.send(JSON.stringify({
+    type: 'input',
+    t: now(),
+    w: input.w, a: input.a, s: input.s, d: input.d,
+    shift: input.shift, crouch: input.crouch, jump: input.jump,
+    yaw: mc.yaw, pitch: mc.pitch,
+  }));
+}
+
+function sendFire(weaponKey, origin, direction, hitTargetId, hitPosition) {
+  if (!socket || socket.readyState !== WebSocket.OPEN) return;
+  socket.send(JSON.stringify({
+    type: 'fire',
+    t: now(),
+    weaponKey,
+    origin: [origin.x, origin.y, origin.z],
+    direction: [direction.x, direction.y, direction.z],
+    hitTargetId,
+    hitPosition: hitPosition ? [hitPosition.x, hitPosition.y, hitPosition.z] : null,
+  }));
+}
+
+function now() { return performance.now(); }
+
 // ------------------------------------------------------------------ Input
 const input = {
   w: false, a: false, s: false, d: false,
   shift: false, crouch: false, jump: false, dash: false,
-  reload: false, fire: false,
+  reload: false, fire: false, slot: null,
 };
 const _onKey = (code, down) => {
   if (code === 'KeyW') input.w = down;
@@ -129,11 +266,10 @@ const _onKey = (code, down) => {
   else if (code === 'Space') input.jump = down;
   else if (code === 'KeyQ') input.dash = down;
   else if (code === 'KeyR') input.reload = down;
-  // Weapon slots: 1=primary, 2=secondary, 3=melee, 4=utility
-  else if (code === 'Digit1' || code === 'Numpad1') { input.slot = 1; }
-  else if (code === 'Digit2' || code === 'Numpad2') { input.slot = 2; }
-  else if (code === 'Digit3' || code === 'Numpad3') { input.slot = 3; }
-  else if (code === 'Digit4' || code === 'Numpad4') { input.slot = 4; }
+  else if (code === 'Digit1' || code === 'Numpad1') input.slot = 1;
+  else if (code === 'Digit2' || code === 'Numpad2') input.slot = 2;
+  else if (code === 'Digit3' || code === 'Numpad3') input.slot = 3;
+  else if (code === 'Digit4' || code === 'Numpad4') input.slot = 4;
 };
 window.addEventListener('keydown', (e) => { _onKey(e.code, true); });
 window.addEventListener('keyup', (e) => { _onKey(e.code, false); if (e.code.startsWith('Digit') || e.code.startsWith('Numpad')) input.slot = null; });
@@ -161,9 +297,7 @@ mc.position.set(0, M.STAND_HEIGHT / 2, 10);
 
 // ------------------------------------------------------------------ Player / loadout state
 let loadout = { ...STARTER_LOADOUT };
-let currentSlot = 1; // 1..4
-
-// Per-weapon ammo state: { [weaponKey]: { mag, reserve } }
+let currentSlot = 1;
 const ammoState = {};
 
 function ammoFor(key) {
@@ -173,7 +307,6 @@ function ammoFor(key) {
   }
   return ammoState[key];
 }
-
 function currentWeaponKey() {
   const slots = { 1: 'primary', 2: 'secondary', 3: 'melee', 4: 'utility' };
   return loadout[slots[currentSlot]];
@@ -184,20 +317,17 @@ function setSlot(slot) {
   if (slot < 1 || slot > 4) return;
   currentSlot = slot;
   const w = currentWeapon();
-  updateSlotsUI();
-  const a = ammoFor(w.name ? w.name : currentWeaponKey());
-  // Use config key for ammo lookup
   const key = currentWeaponKey();
   const am = ammoState[key];
   if (W[key].ammoMag < 0) {
     ammoEl.textContent = '∞';
-  } else {
+  } else if (am) {
     ammoEl.textContent = `${am.mag} / ${am.reserve}`;
   }
+  updateSlotsUI();
   infoEl.innerHTML = `<div style="font-weight:700">${w.name}</div>` +
     `<div style="opacity:0.7">${w.category} • ${w.tier}</div>`;
 }
-
 function updateSlotsUI() {
   const slots = { 1: 'primary', 2: 'secondary', 3: 'melee', 4: 'utility' };
   slotLabels.innerHTML = Object.entries(slots).map(([num, cat]) => {
@@ -207,7 +337,6 @@ function updateSlotsUI() {
     return `${num}. ${w.name}${active}`;
   }).join('  ');
 }
-
 setSlot(1);
 
 // ------------------------------------------------------------------ Reload / fire state
@@ -219,18 +348,14 @@ let reloadWeaponKey = null;
 function startReload() {
   const key = currentWeaponKey();
   const w = W[key];
-  if (!w || w.ammoMag < 0) return; // infinite ammo
+  if (!w || w.ammoMag < 0) return;
   if (reloading && reloadWeaponKey === key) return;
   const am = ammoState[key];
-  if (am.mag >= w.ammoMag || am.reserve <= 0 && am.mag < w.ammoMag) {
-    // can't reload if mag full or no reserve
-    if (am.mag >= w.ammoMag) return;
-  }
-  // Reload-cancel: switching away handled in setSlot / fire. Reloading now.
+  if (am.mag >= w.ammoMag) return;
   reloading = true;
   reloadWeaponKey = key;
   if (reloadTimer) clearTimeout(reloadTimer);
-  const refillMs = w.reloadTime * 600; // spec §3
+  const refillMs = w.reloadTime * 600;
   reloadTimer = setTimeout(() => {
     const am2 = ammoState[key];
     const need = w.ammoMag - am2.mag;
@@ -246,12 +371,8 @@ function startReload() {
     reloadWeaponKey = null;
   }, refillMs);
 }
-
 function cancelReload() {
-  if (reloadTimer) {
-    clearTimeout(reloadTimer);
-    reloadTimer = null;
-  }
+  if (reloadTimer) { clearTimeout(reloadTimer); reloadTimer = null; }
   reloading = false;
   reloadWeaponKey = null;
 }
@@ -260,18 +381,12 @@ function fireWeapon() {
   const key = currentWeaponKey();
   const w = W[key];
   if (!w) return;
-  const now = performance.now();
-  if (now - lastFire < w.fireCooldown * 1000) return;
+  const nowMs = now();
+  if (nowMs - lastFire < w.fireCooldown * 1000) return;
   if (reloading) return;
-
   const am = ammoState[key];
-  if (w.ammoMag >= 0 && am.mag <= 0) {
-    // dry: auto-reload or click does nothing
-    startReload();
-    return;
-  }
-  lastFire = now;
-
+  if (w.ammoMag >= 0 && am.mag <= 0) { startReload(); return; }
+  lastFire = nowMs;
   if (w.ammoMag >= 0) {
     am.mag -= 1;
     if (key === currentWeaponKey()) {
@@ -285,84 +400,43 @@ function fireWeapon() {
   camera.rotation.set(mc.pitch, mc.yaw, 0, 'YXZ');
   camera.updateMatrixWorld();
 
-  if (w.hitscan || w.noFalloff) {
-    doHitscan(w, key);
-  } else if (w.projectile || w.explosive || w.continuous || w.throwable) {
-    doProjectile(w, key);
-  } else if (w.range && w.category === 'Melee') {
-    doMelee(w, key);
-  } else if (w.category === 'Utility') {
-    doUtility(w, key);
-  }
-
-  if (w.ammoMag >= 0 && am.mag <= 0) startReload();
-}
-
-function doHitscan(w, key) {
   const direction = new THREE.Vector3(0, 0, -1).applyEuler(new THREE.Euler(mc.pitch, mc.yaw, 0, 'YXZ'));
-  raycaster.set(camera.position, direction);
+  raycaster.set(eye, direction);
   raycaster.far = w.range || C.MAX_RANGE;
   const hits = raycaster.intersectObjects(world.children, true);
-  const dmg = damageAtRange(w, 0);
-  if (hits.length) {
-    const hit = hits[0];
-    showHitmarker();
-    applyDamage(hit.object, dmg, hit.point);
-  } else {
-    showHitmarker();
-  }
-}
 
-function doProjectile(w, key) {
-  // Raycast Projectile system (spec §4.2): instant raycast for hit detection,
-  // visual projectile is optional. Here we raycast immediately for reliable
-  // hit detection and spawn a tracer.
-  const direction = new THREE.Vector3(0, 0, -1).applyEuler(new THREE.Euler(mc.pitch, mc.yaw, 0, 'YXZ'));
-  raycaster.set(camera.position, direction);
-  raycaster.far = w.range || C.MAX_RANGE;
-  const hits = raycaster.intersectObjects(world.children, true);
-  const dmg = damageAtRange(w, 0);
+  // Remote players are in scene, not world — check them separately.
+  let hitObject = null;
+  let hitPoint = null;
+  let hitTargetId = null;
   if (hits.length) {
-    const hit = hits[0];
-    showHitmarker();
-    applyDamage(hit.object, dmg, hit.point);
-    spawnTracer(camera.position, hit.point);
+    hitObject = hits[0].object;
+    hitPoint = hits[0].point;
+    // Check if it's a remote player mesh
+    let t = hitObject;
+    while (t && !t.userData.playerId) t = t.parent;
+    if (t) hitTargetId = t.userData.playerId;
   } else {
-    const end = camera.position.clone().add(direction.multiplyScalar(w.range || C.MAX_RANGE));
-    spawnTracer(camera.position, end);
-  }
-}
-
-function doMelee(w, key) {
-  const direction = new THREE.Vector3(0, 0, -1).applyEuler(new THREE.Euler(mc.pitch, mc.yaw, 0, 'YXZ'));
-  raycaster.set(camera.position, direction);
-  raycaster.far = w.range || 3;
-  const hits = raycaster.intersectObjects(world.children, true);
-  if (hits.length) {
-    const hit = hits[0];
-    showHitmarker();
-    applyDamage(hit.object, w.damage, hit.point);
-    if (w.silent) {
-      // Katana silent swing — no loud report
+    // Check remote players directly
+    for (const [id, entry] of remotePlayers) {
+      if (entry.mesh.userData.health <= 0) continue;
+      const box = new THREE.Box3().setFromObject(entry.mesh);
+      const rayHits = raycaster.intersectBox(box, new THREE.Vector3());
+      if (rayHits) { hitObject = entry.mesh; hitPoint = rayHits; hitTargetId = id; break; }
     }
   }
-}
 
-function doUtility(w, key) {
-  // Utility: spawn a small projectile/placeholder; effects vary by weapon.
-  const direction = new THREE.Vector3(0, 0, -1).applyEuler(new THREE.Euler(mc.pitch, mc.yaw, 0, 'YXZ'));
-  raycaster.set(camera.position, direction);
-  raycaster.far = w.range || 40;
-  const hits = raycaster.intersectObjects(world.children, true);
-  if (hits.length) {
-    const hit = hits[0];
-    showHitmarker();
-    if (w.damage) applyDamage(hit.object, w.damage, hit.point);
-    if (w.name === 'Grenade') spawnExplosion(hit.point, w.damage || 75);
-  } else {
-    const end = camera.position.clone().add(direction.multiplyScalar(w.range || 40));
-    if (w.name === 'Grenade') spawnExplosion(end, w.damage || 75);
+  // Immediate local hitmarker (spec §7: client registers instantly)
+  showHitmarker();
+  if (hitPoint) {
+    const dmg = damageAtRange(w, eye.distanceTo(hitPoint));
+    applyDamage(hitObject, dmg, hitPoint);
   }
+
+  // Send to server for authoritative validation (spec §7)
+  sendFire(key, eye, direction, hitTargetId, hitPoint);
+
+  if (w.ammoMag >= 0 && am.mag <= 0) startReload();
 }
 
 function damageAtRange(w, distMeters) {
@@ -375,45 +449,14 @@ function damageAtRange(w, distMeters) {
 function applyDamage(obj, dmg, point) {
   if (!obj) return;
   let target = obj;
-  while (target && !target.userData.health && target.parent) target = target.parent;
+  while (target && target.userData.health === undefined && target.parent) target = target.parent;
   if (target.userData.health !== undefined) {
     target.userData.health = Math.max(0, target.userData.health - dmg);
-    console.log(`${target.name || 'target'} took ${dmg} dmg → ${target.userData.health}`);
     if (target.userData.health <= 0) {
       target.visible = false;
       setTimeout(() => { target.visible = true; target.userData.health = 100; }, 3000);
     }
-  } else {
-    console.log(`hit ${obj.name} for ${dmg} (no health)`);
   }
-}
-
-function spawnTracer(start, end) {
-  const line = new THREE.Mesh(
-    new THREE.BoxGeometry(0.05, 0.05, start.distanceTo(end)),
-    new THREE.MeshBasicMaterial({ color: 0xffff00 })
-  );
-  line.position.copy(start).add(end).multiplyScalar(0.5);
-  line.lookAt(end);
-  scene.add(line);
-  setTimeout(() => scene.remove(line), 60);
-}
-
-function spawnExplosion(center, damage) {
-  const sphere = new THREE.Mesh(
-    new THREE.SphereGeometry(2.5, 12, 12),
-    new THREE.MeshBasicMaterial({ color: 0xffaa00, transparent: true, opacity: 0.6 })
-  );
-  sphere.position.copy(center);
-  scene.add(sphere);
-  // Apply damage to nearby entities
-  world.traverse((obj) => {
-    if (obj.userData.health !== undefined) {
-      const d = obj.position.distanceTo(center);
-      if (d < 5) applyDamage(obj, Math.max(0, damage - d * 10), center);
-    }
-  });
-  setTimeout(() => scene.remove(sphere), 400);
 }
 
 function showHitmarker() {
@@ -426,9 +469,10 @@ function showHitmarker() {
 const FIXED_DT = 1 / 60;
 let lastTime = performance.now();
 let accumulator = 0;
+let lastInputSend = 0;
 
 function updateHUD() {
-  hpEl.textContent = `HP 100`;
+  hpEl.textContent = `HP ${Math.max(0, C.DEFAULT_HEALTH)}`;
   updateSlotsUI();
 }
 
@@ -444,12 +488,17 @@ function frame(now) {
     accumulator -= FIXED_DT;
   }
 
+  // Send input to server at server tick rate
+  if (now - lastInputSend >= NET.TICK_INTERVAL_MS) {
+    sendInput();
+    lastInputSend = now;
+  }
+
   // Slot switching (reload-cancel: switching to Fists cancels active reload)
   if (input.slot) {
     const key = currentWeaponKey();
-    const w = W[key];
     if (input.slot === 3 && key === 'FISTS' && reloading && reloadTimer) {
-      cancelReload(); // reload-cancel with Fists
+      cancelReload();
     }
     setSlot(input.slot);
     input.slot = null;

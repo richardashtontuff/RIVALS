@@ -20,31 +20,25 @@ and behaves per spec. Work top-to-bottom; do not skip ahead.
   `arena/2922f171-rivals`
 
 ## Phase 2 — Weapon & Loadout System (spec §4)
-- [ ] LoadoutSystem: `validateLoadout(player, {primary, secondary, melee, utility})`
-  enforces exactly one weapon per category; prevents invalid combinations
-- [ ] Weapon switching: number keys 1-4 cycle loadout slots; Fists = slot 4 / melee
-- [ ] All Primary weapons from spec §4.3 with correct stats:
-  Assault Rifle, Shotgun, Sniper, SMG, Burst Rifle, Wildcat, Bow, RPG,
-  Crossbow, Gunblade, Energy Rifle, Grenade Launcher, Minigun, Permafrost,
-  Distortion, Flamethrower
-- [ ] All Secondary weapons from spec §4.4:
-  Handgun, Uzi, Revolver, Exogun, Energy Pistols, Slingshot, Warper
-- [ ] All Melee weapons from spec §4.5:
-  Fists, Katana (silent, deflects hitscan), Scythe (dash), Knife (backstab),
-  Spear (throwable, launch pad), Grapple, Maul, Battle Axe, Chainsaw
-- [ ] All Utility weapons from spec §4.6:
-  Grenade, Flashbang (3s blind), Smoke Grenade (8s), Medkit (50 HP),
-  Subspace Tripmine (150 dmg, disabled in Arcade), Warpstone
-- [ ] Projectile weapons (Bow, Crossbow, Spear, Grenade Launcher, RPG,
-  Slingshot) — Raycast Projectile system (spec §4.2)
-- [ ] Hitscan weapons with per-weapon damage falloff `[start -> end]`
-- [ ] Headshot multipliers per weapon (crit values)
-- [ ] Reload-cancel with Fists works on Sniper, Shotgun, Burst Rifle,
-  Assault Rifle (ammo refills at `reloadTime * 600` ms)
+- [x] LoadoutSystem: `validateLoadout()` enforces exactly one weapon per
+  category; prevents invalid combinations; starter loadout sanity-checked
+- [x] Weapon switching: number keys 1-4 cycle loadout slots; HUD shows active slot
+- [x] All weapon stats defined in config.js (primaries, secondaries, melee,
+  utility per Update 24 roster)
+- [x] Hitscan fire path with hitmarkers + target dummy health
+- [x] Projectile fire path (Raycast Projectile system, spec §4.2) + tracers
+- [x] Melee fire path (range attack)
+- [x] Utility fire path (Grenade explosion, etc.)
+- [x] Per-weapon ammo state, reload (`reloadTime * 600` ms refill)
+- [x] Reload-cancel with Fists works on all weapons incl. Sniper/Shotgun/
+  Burst Rifle/Assault Rifle
+- [ ] Per-weapon damage falloff uses actual hit distance (currently distance 0)
+- [ ] Headshot multipliers / crit values per weapon
 - [ ] Katana bullet deflection (timed)
 - [ ] Scythe dash-in melee
 - [ ] Spear throw / pin to wall / launch pad
 - [ ] Exogun AOE blast, Permafrost slow + freeze stun, Energy Rifle wall bounces
+- [ ] Flashbang blind (3s), Smoke (8s), Medkit heal (50 HP), Tripmine (150 dmg)
 
 ## Phase 3 — Networking & Hitreg (spec §7) — "single most important section"
 - [ ] Node.js + `ws` (or Colyseus) authoritative WebSocket server

@@ -20,6 +20,7 @@
   },
   "homepage": "https://github.com/richardashtontuff/RIVALS#readme",
   "dependencies": {
-    "three": "^0.187.0"
+    "three": "^0.187.0",
+    "ws": "^8.22.1"
   }
 }
