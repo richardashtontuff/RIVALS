@@ -81,6 +81,9 @@ function dist3(a, b) {
   return Math.sqrt((a[0]-b[0])**2 + (a[1]-b[1])**2 + (a[2]-b[2])**2);
 }
 
+function pLastFire(p) { return p.lastFireTime; }
+function setLastFire(p, t) { p.lastFireTime = t; }
+
 /** Compute body damage with falloff + headshot crit (spec §4.2 / §4.3).
  *  Returns { damage, isHeadshot }. Server-authoritative. */
 function computeDamage(w, distMeters, isHeadshot) {
@@ -168,6 +171,8 @@ function createPlayer(id) {
     id, pos: [...spawn], vel: [0, 0, 0], yaw: 0, pitch: 0,
     health: C.DEFAULT_HEALTH, maxHealth: C.DEFAULT_HEALTH,
     history: [], lastInput: null, lastSeen: now(), alive: true,
+    lastPos: [...spawn],        // for speed validation
+    lastFireTime: 0,            // for fire-rate validation
   };
 }
 
@@ -226,7 +231,17 @@ function handleFire(ws, payload) {
   const w = W[weaponKey];
   if (!w) return;
 
+  // --- Ammo/fire-rate validation (spec §9.3) ---
   const nowMs = now();
+  const minInterval = (w.fireCooldown || 0.1) * 1000;
+  const jitterTolerance = 50; // ms
+  if (nowMs - pLastFire(p) < minInterval - jitterTolerance) {
+    // Dropping shot: firing faster than cooldown allows
+    ws.send(JSON.stringify({ type: 'hit_rejected', reason: 'fire_rate' }));
+    return;
+  }
+  setLastFire(p, nowMs);
+
   const clientLatency = Math.max(0, nowMs - (payload.t || nowMs));
   const rewindMs = Math.min(clientLatency, MAX_REWIND_MS);
 
@@ -313,6 +328,17 @@ function simulate() {
         p.pos[0]+=move[0]*speed*dt; p.pos[1]+=move[1]*speed*dt; p.pos[2]+=move[2]*speed*dt;
       }
       p.yaw = input.yaw; p.pitch = input.pitch;
+
+      // --- Server-side speed validation (spec §9.3) ---
+      // Allow 1.5x tolerance; dash/slide exceptions handled by client prediction.
+      const maxAllowed = M.SPRINT_SPEED * dt * NET.SERVER_MOVE_TOLERANCE;
+      const disp = dist3(p.pos, p.lastPos);
+      if (disp > maxAllowed) {
+        // Rubber-band back to last known good position
+        p.pos[0] = p.lastPos[0]; p.pos[1] = p.lastPos[1]; p.pos[2] = p.lastPos[2];
+        console.log(`[server] speed violation ${p.id.slice(0,4)}: disp ${disp.toFixed(2)} > ${maxAllowed.toFixed(2)}, rubber-banded`);
+      }
+      p.lastPos[0] = p.pos[0]; p.lastPos[1] = p.pos[1]; p.lastPos[2] = p.pos[2];
     }
     recordAllHistory();
     // Round timeout

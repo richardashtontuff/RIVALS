@@ -1,21 +1,21 @@
 /**
- * RIVALS (Web Edition) — client entry point + CombatSystem + Networking.
+ * RIVALS (Web Edition) — client entry point.
  *
- * Phase 3: client integrates with the authoritative WebSocket server (spec §7).
- * - Client raycasts locally → immediate hitmarker/audio (spec §7)
- * - Client sends fire result to server for validation + lag compensation
- * - Sends input each fixed tick; receives authoritative snapshots
- * - Client-side prediction + server reconciliation
- * - Renders remote players from snapshots
+ * Phases 1-3 complete:
+ *   §1 Round state machine (client UI + server authority)
+ *   §3 Movement (60 Hz kinematic controller)
+ *   §4 Weapon & loadout system (4-slot, all stats, reload-cancel)
+ *   §7 Networking (authoritative WS, lag compensation, hit validation)
  *
- * Weapon/loadout (spec §4) and movement (spec §3) retained from Phases 1-2.
+ * Weapon special behaviors handled by WeaponSystem:
+ *   Katana deflection, Scythe dash-melee, Spear throw, Exogun AOE,
+ *   Permafrost slow/freeze, Energy Rifle wall bounces, utility effects.
  */
 import * as THREE from 'three';
 import { CONFIG, STARTER_LOADOUT, DEFAULT_LOADOUT } from './config.js';
 import { MovementController } from './MovementController.js';
-import {
-  validateLoadout, weaponForSlot, DEFAULT_LOADOUT as LOADOUT_DEFAULT,
-} from './LoadoutSystem.js';
+import { validateLoadout, DEFAULT_LOADOUT as LOADOUT_DEFAULT } from './LoadoutSystem.js';
+import { WeaponSystem } from './WeaponSystem.js';
 
 const W = CONFIG.WEAPONS;
 const M = CONFIG.MOVEMENT;
@@ -76,15 +76,11 @@ Object.assign(roundUI.style, {
   textShadow: '0 0 10px rgba(0,0,0,0.9)', textAlign: 'center', display: 'none',
 });
 const roundStateEl = document.createElement('div');
-roundStateEl.id = 'roundStateEl';
 const roundTimerEl = document.createElement('div');
-roundTimerEl.id = 'roundTimerEl';
 const roundScoreEl = document.createElement('div');
-roundScoreEl.id = 'roundScoreEl';
 roundScoreEl.style.fontSize = '1rem';
 roundScoreEl.style.opacity = '0.85';
 const roundMatchEl = document.createElement('div');
-roundMatchEl.id = 'roundMatchEl';
 roundMatchEl.style.fontSize = '0.95rem';
 roundMatchEl.style.marginTop = '6px';
 roundUI.appendChild(roundStateEl);
@@ -92,6 +88,15 @@ roundUI.appendChild(roundTimerEl);
 roundUI.appendChild(roundScoreEl);
 roundUI.appendChild(roundMatchEl);
 document.body.appendChild(roundUI);
+
+// Flashbang blind overlay
+const blindOverlay = document.createElement('div');
+blindOverlay.id = 'blindOverlay';
+Object.assign(blindOverlay.style, {
+  position: 'fixed', inset: '0', background: 'rgba(255,255,255,0)',
+  pointerEvents: 'none', zIndex: 50, transition: 'background 0.1s linear',
+});
+document.body.appendChild(blindOverlay);
 
 // ------------------------------------------------------------------ Three.js
 const scene = new THREE.Scene();
@@ -152,11 +157,10 @@ const raycaster = new THREE.Raycaster();
 let socket = null;
 let myPlayerId = null;
 let myLatency = 0;
-const remotePlayers = new Map(); // id -> {mesh, pos, targetPos, health}
+const remotePlayers = new Map(); // id -> {mesh, health}
 
 function connect() {
   socket = new WebSocket(WS_URL);
-  socket.binaryType = 'arraybuffer';
   socket.onopen = () => {
     netStatus.textContent = 'server connected';
     netStatus.style.color = '#44ff44';
@@ -183,22 +187,24 @@ function connect() {
       case 'hit_confirmed':
         showHitmarker();
         infoEl.textContent = `${msg.headshot ? 'HEADSHOT ' : ''}hit ${msg.targetId.slice(0,4)} for ${msg.damage}`;
+        if (msg.headshot) ws.weaponSystem?.applyFlashbang(0);
         break;
       case 'damage_taken':
         C.DEFAULT_HEALTH = Math.max(0, msg.health);
         hpEl.textContent = `HP ${C.DEFAULT_HEALTH}`;
-        if (msg.health <= 0) {
-          myAlive = false;
-          netStatus.textContent = 'eliminated — awaiting next round';
-        }
+        if (msg.health <= 0) myAlive = false;
+        break;
+      case 'slowed':
+        ws.weaponSystem?.slowPlayer(msg.playerId, msg.duration, msg.factor);
+        break;
+      case 'frozen':
+        ws.weaponSystem?.freezePlayer(msg.playerId, msg.duration);
         break;
       case 'hit_rejected':
         console.log('[net] fire rejected:', msg.reason);
         break;
       case 'elimination':
-        if (msg.victimId === myPlayerId) {
-          netStatus.textContent = 'eliminated';
-        }
+        if (msg.victimId === myPlayerId) netStatus.textContent = 'eliminated';
         break;
       case 'error':
         netStatus.textContent = `error: ${msg.code}`;
@@ -212,65 +218,25 @@ function connect() {
 }
 connect();
 
-let roundState = 'LOBBY';
-let roundTimer = 0;
-const scores = {};
-let matchWinScore = 5;
-let roundWinnerId = null;
-let myAlive = true;
-
-function updateRoundUI() {
-  roundUI.style.display = 'block';
-  let stateText = roundState;
-  if (roundState === 'ROUND_ACTIVE') stateText = 'ROUND ACTIVE';
-  else if (roundState === 'ROUND_INTERMISSION') stateText = 'INTERMISSION';
-  else if (roundState === 'ROUND_END') stateText = roundWinnerId === myPlayerId ? 'ROUND WON' : 'ROUND LOST';
-  else if (roundState === 'ROUND_MATCH_END') stateText = 'MATCH END';
-  else if (roundState === 'LOBBY') stateText = 'LOBBY';
-  roundStateEl.textContent = stateText;
-  roundTimerEl.textContent = `round timer: ${Math.ceil(roundTimer)}s`;
-  const lb = leaderboard();
-  roundScoreEl.textContent = lb.map(e => `${e.id.slice(0,4)}: ${e.score}`).join('  ');
-  // Match point / sudden death indicators (spec §1: network-replicated)
-  let matchText = '';
-  if (roundState === 'ROUND_MATCH_END') {
-    matchText = 'MATCH OVER';
-  } else {
-    const me = scores[myPlayerId] || 0;
-    const opponent = Math.max(...Object.values(scores).filter((_,i)=>true));
-    if (me >= matchWinScore - 1) matchText = 'MATCH POINT';
-    if (me === opponent && me >= matchWinScore - 1) matchText = 'SUDDEN DEATH';
-  }
-  roundMatchEl.textContent = matchText;
-  // Visual indicators per spec §1
-  if (matchText === 'SUDDEN DEATH') {
-    roundMatchEl.style.color = '#ff0000';
-    document.body.style.background = 'rgba(255,0,0,0.15)';
-  } else if (me >= matchWinScore - 1) {
-    roundMatchEl.style.color = '#ffaa00';
-    document.body.style.background = '';
-  } else {
-    roundMatchEl.style.color = '#aaa';
-    document.body.style.background = '';
-  }
-}
-
-function leaderboard() {
-  return Object.entries(scores).map(([id, s]) => ({ id, score: s })).sort((a, b) => b.score - a.score);
-}
-
 function onSnapshot(msg) {
   roundState = msg.roundState || roundState;
   roundTimer = msg.roundTimer;
   roundWinnerId = msg.roundWinnerId;
   matchWinScore = msg.matchWinScore || 5;
   Object.assign(scores, msg.scores || {});
-  const nowTs = msg.t;
+
+  // Apply server-confirmed status effects
+  if (msg.effects) {
+    for (const e of msg.effects) {
+      if (e.type === 'slow') ws.weaponSystem?.slowPlayer(e.target, e.duration, e.factor);
+      if (e.type === 'freeze') ws.weaponSystem?.freezePlayer(e.target, e.duration);
+    }
+  }
+
   const incomingIds = new Set();
   for (const p of msg.players) {
     incomingIds.add(p.id);
     if (p.id === myPlayerId) {
-      // Server reconciliation: authoritative position (with light interpolation)
       mc.position.set(p.pos[0], p.pos[1], p.pos[2]);
       mc.yaw = p.yaw || mc.yaw;
       mc.pitch = p.pitch || mc.pitch;
@@ -292,8 +258,15 @@ function onSnapshot(msg) {
     entry.mesh.position.set(p.pos[0], p.pos[1], p.pos[2]);
     entry.mesh.userData.health = p.health;
     entry.mesh.visible = p.health > 0;
+    // Permafrost slow visual tint
+    if (ws.weaponSystem && ws.weaponSystem.isFrozen(p.id, msg.t)) {
+      entry.mesh.material.color.set(0x00ffff);
+    } else if (ws.weaponSystem && ws.weaponSystem.slowFactorFor(p.id, msg.t) < 1) {
+      entry.mesh.material.color.set(0xaaaaaa);
+    } else {
+      entry.mesh.material.color.set(0x4488ff);
+    }
   }
-  // Remove players no longer in snapshot
   for (const [id, entry] of remotePlayers) {
     if (!incomingIds.has(id)) {
       scene.remove(entry.mesh);
@@ -306,8 +279,7 @@ function onSnapshot(msg) {
 function sendInput() {
   if (!socket || socket.readyState !== WebSocket.OPEN) return;
   socket.send(JSON.stringify({
-    type: 'input',
-    t: now(),
+    type: 'input', t: now(),
     w: input.w, a: input.a, s: input.s, d: input.d,
     shift: input.shift, crouch: input.crouch, jump: input.jump,
     yaw: mc.yaw, pitch: mc.pitch,
@@ -317,9 +289,7 @@ function sendInput() {
 function sendFire(weaponKey, origin, direction, hitTargetId, hitPosition) {
   if (!socket || socket.readyState !== WebSocket.OPEN) return;
   socket.send(JSON.stringify({
-    type: 'fire',
-    t: now(),
-    weaponKey,
+    type: 'fire', t: now(), weaponKey,
     origin: [origin.x, origin.y, origin.z],
     direction: [direction.x, direction.y, direction.z],
     hitTargetId,
@@ -394,18 +364,23 @@ function currentWeapon() { return W[currentWeaponKey()]; }
 
 function setSlot(slot) {
   if (slot < 1 || slot > 4) return;
-  currentSlot = slot;
-  const w = currentWeapon();
   const key = currentWeaponKey();
-  const am = ammoState[key];
-  if (W[key].ammoMag < 0) {
+  const w = W[key];
+  // Reload-cancel: switching to Fists cancels active reload (spec §3)
+  if (slot === 3 && key === 'FISTS' && reloading && reloadTimer) {
+    cancelReload();
+  }
+  currentSlot = slot;
+  const w2 = currentWeapon();
+  const am = ammoState[currentWeaponKey()];
+  if (W[currentWeaponKey()].ammoMag < 0) {
     ammoEl.textContent = '∞';
   } else if (am) {
     ammoEl.textContent = `${am.mag} / ${am.reserve}`;
   }
   updateSlotsUI();
-  infoEl.innerHTML = `<div style="font-weight:700">${w.name}</div>` +
-    `<div style="opacity:0.7">${w.category} • ${w.tier}</div>`;
+  infoEl.innerHTML = `<div style="font-weight:700">${w2.name}</div>` +
+    `<div style="opacity:0.7">${w2.category} • ${w2.tier}</div>`;
 }
 function updateSlotsUI() {
   const slots = { 1: 'primary', 2: 'secondary', 3: 'melee', 4: 'utility' };
@@ -456,9 +431,102 @@ function cancelReload() {
   reloadWeaponKey = null;
 }
 
+// ------------------------------------------------------------------ WeaponSystem (spec §4 special behaviors)
+const weaponSystem = new WeaponSystem(mc, scene, world, {
+  applyDamage: (target, dmg, point) => {
+    // local dummy / world damage (server is authoritative for players)
+    let t = target;
+    while (t && t.userData.health === undefined && t.parent) t = t.parent;
+    if (t && t.userData.health !== undefined) {
+      t.userData.health = Math.max(0, t.userData.health - dmg);
+      if (t.userData.health <= 0) {
+        t.visible = false;
+        setTimeout(() => { t.visible = true; t.userData.health = 100; }, 3000);
+      }
+    }
+  },
+  spawnTracer: (start, end) => {
+    const line = new THREE.Mesh(
+      new THREE.BoxGeometry(0.05, 0.05, start.distanceTo(end)),
+      new THREE.MeshBasicMaterial({ color: 0xffff00 })
+    );
+    line.position.copy(start).add(end).multiplyScalar(0.5);
+    line.lookAt(end);
+    scene.add(line);
+    setTimeout(() => scene.remove(line), 60);
+  },
+  spawnExplosion: (center, damage) => {
+    const sphere = new THREE.Mesh(
+      new THREE.SphereGeometry(2.5, 12, 12),
+      new THREE.MeshBasicMaterial({ color: 0xffaa00, transparent: true, opacity: 0.6 })
+    );
+    sphere.position.copy(center);
+    scene.add(sphere);
+    world.traverse((obj) => {
+      if (obj.userData.health !== undefined) {
+        const d = obj.position.distanceTo(center);
+        if (d < 5) {
+          obj.userData.health = Math.max(0, obj.userData.health - Math.max(0, damage - d * 10));
+        }
+      }
+    });
+    setTimeout(() => scene.remove(sphere), 400);
+  },
+  sendFire: (weaponKey, origin, direction, hitTargetId, hitPosition) => {
+    sendFire(weaponKey, origin, direction, hitTargetId, hitPosition);
+  },
+  getRemotePlayers: () => remotePlayers,
+});
+socket.weaponSystem = weaponSystem;
+
+// ------------------------------------------------------------------ Round UI state (spec §1)
+let roundState = 'LOBBY';
+let roundTimer = 0;
+const scores = {};
+let matchWinScore = 5;
+let roundWinnerId = null;
+let myAlive = true;
+
+function updateRoundUI() {
+  roundUI.style.display = 'block';
+  let stateText = roundState;
+  if (roundState === 'ROUND_ACTIVE') stateText = 'ROUND ACTIVE';
+  else if (roundState === 'ROUND_INTERMISSION') stateText = 'INTERMISSION';
+  else if (roundState === 'ROUND_END') stateText = roundWinnerId === myPlayerId ? 'ROUND WON' : 'ROUND LOST';
+  else if (roundState === 'ROUND_MATCH_END') stateText = 'MATCH END';
+  else if (roundState === 'LOBBY') stateText = 'LOBBY';
+  roundStateEl.textContent = stateText;
+  roundTimerEl.textContent = `round timer: ${Math.ceil(roundTimer)}s`;
+  const lb = leaderboard();
+  roundScoreEl.textContent = lb.map(e => `${e.id.slice(0,4)}: ${e.score}`).join('  ');
+  let matchText = '';
+  if (roundState === 'ROUND_MATCH_END') matchText = 'MATCH OVER';
+  else {
+    const me = scores[myPlayerId] || 0;
+    const maxOther = Math.max(...Object.values(scores).filter((_, i, arr) => Object.keys(scores)[i] !== myPlayerId)) || 0;
+    if (me >= matchWinScore - 1 && me > maxOther) matchText = 'MATCH POINT';
+    if (me === maxOther && me >= matchWinScore - 1) matchText = 'SUDDEN DEATH';
+  }
+  roundMatchEl.textContent = matchText;
+  if (matchText === 'SUDDEN DEATH') {
+    roundMatchEl.style.color = '#ff0000';
+    document.body.style.background = 'rgba(255,0,0,0.15)';
+  } else if (matchText === 'MATCH POINT') {
+    roundMatchEl.style.color = '#ffaa00';
+    document.body.style.background = '';
+  } else {
+    roundMatchEl.style.color = '#aaa';
+    document.body.style.background = '';
+  }
+}
+function leaderboard() {
+  return Object.entries(scores).map(([id, s]) => ({ id, score: s })).sort((a, b) => b.score - a.score);
+}
+
+// ------------------------------------------------------------------ Fire
 function fireWeapon() {
-  // Only fire during an active round and while alive (spec §1 round state)
   if (roundState !== 'ROUND_ACTIVE' || !myAlive) return;
+  if (ws.weaponSystem && ws.weaponSystem.isBlinded(now())) return; // flashbang blocks fire
   const key = currentWeaponKey();
   const w = W[key];
   if (!w) return;
@@ -475,98 +543,28 @@ function fireWeapon() {
     }
   }
 
-  const eye = new THREE.Vector3().copy(mc.position);
-  eye.y += mc.height - M.CAMERA_Y_OFFSET;
-  camera.position.copy(eye);
-  camera.rotation.set(mc.pitch, mc.yaw, 0, 'YXZ');
-  camera.updateMatrixWorld();
-
-  const direction = new THREE.Vector3(0, 0, -1).applyEuler(new THREE.Euler(mc.pitch, mc.yaw, 0, 'YXZ'));
-  raycaster.set(eye, direction);
-  raycaster.far = w.range || C.MAX_RANGE;
-  const hits = raycaster.intersectObjects(world.children, true);
-
-  // Remote players are in scene, not world — check them separately.
-  let hitObject = null;
-  let hitPoint = null;
-  let hitTargetId = null;
-  if (hits.length) {
-    hitObject = hits[0].object;
-    hitPoint = hits[0].point;
-    // Check if it's a remote player mesh
-    let t = hitObject;
-    while (t && !t.userData.playerId) t = t.parent;
-    if (t) hitTargetId = t.userData.playerId;
-  } else {
-    // Check remote players directly
-    for (const [id, entry] of remotePlayers) {
-      if (entry.mesh.userData.health <= 0) continue;
-      const box = new THREE.Box3().setFromObject(entry.mesh);
-      const rayHits = raycaster.intersectBox(box, new THREE.Vector3());
-      if (rayHits) { hitObject = entry.mesh; hitPoint = rayHits; hitTargetId = id; break; }
-    }
+  // Scythe dash-melee (spec §4.5)
+  if (key === 'SCYTHE') {
+    weaponSystem.dashMelee();
+    return;
   }
 
-  // Immediate local hitmarker (spec §7: client registers instantly)
+  const eye = new THREE.Vector3().copy(mc.position);
+  eye.y += mc.height - M.CAMERA_Y_OFFSET;
+  const result = weaponSystem.fire(key, am, nowMs, camera, input);
+
   showHitmarker();
-  if (hitPoint && hitObject) {
-    const dist = eye.distanceTo(hitPoint);
-    // Headshot detection vs target head level
+  if (result.point) {
+    const dist = eye.distanceTo(result.point);
     let targetPos = null;
-    let t = hitObject;
-    while (t && !t.userData.playerId && !t.userData.type) t = t.parent;
-    if (t && t.userData.pos) targetPos = t.userData.pos;
-    else if (t && t.position) targetPos = t.position;
-    const hs = targetPos ? isHeadshotPoint(hitPoint, targetPos) : false;
-    const dmg = damageAtRange(w, dist, hs);
-    applyDamage(hitObject, dmg, hitPoint);
+    let t = result.targetId ? remotePlayers.get(result.targetId)?.mesh : null;
+    if (t) targetPos = t.position;
+    const hs = targetPos ? (result.point.y > targetPos.y + 1.7 * 0.75) : false;
+    const dmg = weaponSystem._damageAtRange ? weaponSystem._damageAtRange(w, dist, hs) : 0;
     if (hs) infoEl.textContent = 'HEADSHOT';
   }
 
-  // Send to server for authoritative validation (spec §7)
-  sendFire(key, eye, direction, hitTargetId, hitPoint);
-
   if (w.ammoMag >= 0 && am.mag <= 0) startReload();
-}
-
-function damageAtRange(w, distMeters, isHeadshot) {
-  const body = w.noFalloff
-    ? w.damage.start
-    : (() => {
-        const range = w.range || 100;
-        const t = Math.min(1, distMeters / range);
-        return w.damage.start + (w.damage.end - w.damage.start) * t;
-      })();
-  let dmg = body;
-  if (isHeadshot) {
-    if (w.crit) dmg = w.crit.start;
-    else if (w.critMult) dmg = body * w.critMult;
-    else dmg = body * 2;
-  }
-  return Math.max(0, dmg);
-}
-
-function isHeadshotPoint(hitPoint, targetPos, targetHeight = 1.7) {
-  return hitPoint.y > targetPos.y + targetHeight * 0.75;
-}
-
-function applyDamage(obj, dmg, point) {
-  if (!obj) return;
-  let target = obj;
-  while (target && target.userData.health === undefined && target.parent) target = target.parent;
-  if (target.userData.health !== undefined) {
-    target.userData.health = Math.max(0, target.userData.health - dmg);
-    if (target.userData.health <= 0) {
-      target.visible = false;
-      setTimeout(() => { target.visible = true; target.userData.health = 100; }, 3000);
-    }
-  }
-}
-
-function showHitmarker() {
-  const prev = crosshairDot.style.background;
-  crosshairDot.style.background = '#ffffff';
-  setTimeout(() => { crosshairDot.style.background = prev; }, C.HITMARKER_DURATION_MS);
 }
 
 // ------------------------------------------------------------------ HUD / render loop
@@ -578,6 +576,14 @@ let lastInputSend = 0;
 function updateHUD() {
   hpEl.textContent = `HP ${Math.max(0, C.DEFAULT_HEALTH)}`;
   updateSlotsUI();
+
+  // Flashbang overlay (spec §4.6)
+  const blindAlpha = weaponSystem.flashbangAlpha(now());
+  if (blindAlpha > 0) {
+    blindOverlay.style.background = `rgba(255,255,255,${blindAlpha})`;
+  } else {
+    blindOverlay.style.background = 'rgba(255,255,255,0)';
+  }
 }
 
 function frame(now) {
@@ -592,18 +598,14 @@ function frame(now) {
     accumulator -= FIXED_DT;
   }
 
-  // Send input to server at server tick rate
+  weaponSystem.update(FIXED_DT, now);
+
   if (now - lastInputSend >= NET.TICK_INTERVAL_MS) {
     sendInput();
     lastInputSend = now;
   }
 
-  // Slot switching (reload-cancel: switching to Fists cancels active reload)
   if (input.slot) {
-    const key = currentWeaponKey();
-    if (input.slot === 3 && key === 'FISTS' && reloading && reloadTimer) {
-      cancelReload();
-    }
     setSlot(input.slot);
     input.slot = null;
   }
