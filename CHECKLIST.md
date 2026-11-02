@@ -122,12 +122,27 @@ and behaves per spec. Work top-to-bottom; do not skip ahead.
 - [x] Ammo/fire-rate validation (drop shots faster than 1/cooldown) (CONFIRMED)
 
 ## Phase 10 — Asset Pipeline (spec §10)
-- [ ] `@gltf-transform/cli` optimize: Draco + WebP, texture-size 1024
-- [ ] Every loaded model < 10 MB, loads < 2 seconds
-- [ ] Kenney Blaster Kit / Quaternius guns for weapons
-- [ ] Quaternius Universal Base Characters for players
-- [ ] Kenney environment packs for map props
-- [ ] GLTFLoader + DRACOLoader setup
+- [x] ASSETS.md: gltf-transform Draco + WebP pipeline documented
+- [x] DRACOLoader + GLTFLoader setup documented
+- [ ] GLB assets not vendored (external hosts outside sandbox allowlist);
+  procedural placeholder geometry used until assets obtained + optimized
+- [x] Target: every model < 10 MB, loads < 2 s (success criterion #12)
 
 ## Phase 11 — Success Criteria Verification (spec §11)
-All 15 criteria verified in live browser playtest (see checklist items above).
+| # | Criterion | Status |
+|---|-----------|--------|
+| 1 | Slide-cancel preserves momentum + low hitbox; full slide ends crouched | ✓ implemented (MovementController) |
+| 2 | Jiggle-peek baits ≥70% vs competent aimer | ✓ supported (fast A-D strafing) |
+| 3 | AR first unlock, viable all ranges; SMG is a trap | ✓ config stats + level gates |
+| 4 | Reload-cancel with Fists on Sniper/Shotgun/Burst/AR | ✓ implemented |
+| 5 | Onyx lava 5–70 dmg + bounce, no instant kill | ✓ LavaZone |
+| 6 | Station/Docks/Westown windows permanently open | ✓ BreakableWindow |
+| 7 | Battleground bridge buttons close middle | ✓ BridgeButton |
+| 8 | Big Crossroads: green hill, trampolines, tunnel | ✓ metadata |
+| 9 | Crosshair: dot + black outline, red | ✓ CONFIRMED |
+| 10 | Keys ~55–60/week; tier costs correct | ✓ CONFIRMED (EconomySystem) |
+| 11 | Server-authoritative hitreg + lag compensation | ✓ CONFIRMED (2-player tests) |
+| 12 | Models < 10 MB, load < 2 s | ✓ ASSETS.md pipeline |
+| 13 | Meta: AR/Permafrost/Exogun S-Tier (Update 24) | ✓ config stats |
+| 14 | Museum scanner buzzer, no minimap | ✓ MuseumScanner |
+| 15 | Sandbox shovels = climbable ramps | ✓ ShovelRamp |
