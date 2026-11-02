@@ -1,11 +1,13 @@
 /**
- * RIVALS (Web Edition) — Authoritative WebSocket server (spec §7).
+ * RIVALS (Web Edition) — Authoritative WebSocket server (spec §1 + §7).
+ *
+ * Round state machine (server-authoritative):
+ *   Lobby → Intermission (Map Vote) → Round Active → Round End →
+ *   [score < 5: Intermission] → [score = 5: Match End]
  *
  * Server-authoritative hit validation with lag compensation:
  *   - Client raycasts locally → immediate hitmarker
- *   - Client sends fire result (origin, direction, hit target, hit position)
- *   - Server rewinds target positions using a position-history buffer
- *   - Server re-raycasts from shooter's position to confirm no obstruction
+ *   - Client sends fire result → server validates (sanity + re-raycast + rewind)
  *   - Server applies damage; never trusts client damage values
  *
  * Fixed 20 Hz simulation tick; max rewind window 250 ms.
@@ -21,14 +23,25 @@ const W = CONFIG.WEAPONS;
 const PORT = process.env.PORT || 5074;
 const TICK_INTERVAL = 1000 / NET.TICK_RATE; // 50 ms
 const MAX_REWIND_MS = NET.MAX_REWIND_MS;
-const POSITION_HISTORY_MS = 300; // keep slightly more than max rewind
+const POSITION_HISTORY_MS = 300;
+
+// Round timing (spec §1)
+const ROUND_TIME_S = 180;        // 3 minute rounds
+const INTERMISSION_TIME_S = 8;   // map vote / between rounds
+const MATCH_WIN_SCORE = 5;       // first to 5 round wins
+
+// Round state enum
+const ROUND_LOBBY = 'LOBBY';
+const ROUND_INTERMISSION = 'INTERMISSION';
+const ROUND_ACTIVE = 'ROUND_ACTIVE';
+const ROUND_END = 'ROUND_END';
+const ROUND_MATCH_END = 'MATCH_END';
 
 // ----------------------------------------------------------------- Helpers
 function now() { return performance.now(); }
 
 /** Server-side AABB obstacle mirroring client cover/walls for raycast checks. */
 const OBSTACLES = [
-  // name, min, max
   { name: 'cover', min: [-3, 0, -3], max: [3, 4, 3] },
   { name: 'wall_back', min: [-60, 0, -61], max: [60, 12, -59] },
   { name: 'wall_front', min: [-60, 0, 59], max: [60, 12, 61] },
@@ -51,18 +64,13 @@ function rayAabb(origin, dir, min, max) {
   return tmin >= 0 ? tmin : null;
 }
 
-/** Raycast against server obstacles. Returns first hit {obstacle, t, point} or null. */
 function serverRaycast(origin, dir, ignoreTarget) {
   let best = null;
   for (const obs of OBSTACLES) {
     if (ignoreTarget && obs.name === ignoreTarget) continue;
     const t = rayAabb(origin, dir, obs.min, obs.max);
     if (t !== null) {
-      const point = [
-        origin[0] + dir[0] * t,
-        origin[1] + dir[1] * t,
-        origin[2] + dir[2] * t,
-      ];
+      const point = [origin[0] + dir[0] * t, origin[1] + dir[1] * t, origin[2] + dir[2] * t];
       if (best === null || t < best.t) best = { obstacle: obs.name, t, point };
     }
   }
@@ -73,37 +81,79 @@ function dist3(a, b) {
   return Math.sqrt((a[0]-b[0])**2 + (a[1]-b[1])**2 + (a[2]-b[2])**2);
 }
 
+// ----------------------------------------------------------------- Game state (round machine)
+const scores = new Map(); // playerId -> round wins
+let roundState = ROUND_LOBBY;
+let roundTimer = INTERMISSION_TIME_S;
+let roundWinnerId = null;
+let currentMap = 'Arena';
+
+function ensureScore(id) { if (!scores.has(id)) scores.set(id, 0); }
+function leaderboard() {
+  return Array.from(scores.entries()).map(([id, s]) => ({ id, score: s })).sort((a, b) => b.score - a.score);
+}
+
+function startIntermission() {
+  roundState = ROUND_INTERMISSION;
+  roundTimer = INTERMISSION_TIME_S;
+  roundWinnerId = null;
+  console.log(`[server] INTERMISSION (map vote) — scores: ${JSON.stringify(Object.fromEntries(scores))}`);
+}
+
+function startRound() {
+  roundState = ROUND_ACTIVE;
+  roundTimer = ROUND_TIME_S;
+  roundWinnerId = null;
+  // Respawn all players
+  for (const [id, p] of players) {
+    ensureScore(id);
+    p.health = C.DEFAULT_HEALTH;
+    p.pos = [0, 1, 10];
+    p.history = [];
+    if (Math.random() < 0.5) p.pos = [0, 1, -10]; // alternate spawn for duel
+  }
+  console.log(`[server] ROUND ACTIVE`);
+}
+
+function endRound(winnerId) {
+  roundState = ROUND_END;
+  roundWinnerId = winnerId;
+  roundTimer = 6; // show results for 6s
+  if (winnerId) {
+    ensureScore(winnerId);
+    scores.set(winnerId, scores.get(winnerId) + 1);
+  }
+  const lb = leaderboard();
+  console.log(`[server] ROUND END — winner ${winnerId?.slice(0,4)}, scores: ${JSON.stringify(Object.fromEntries(scores))}`);
+  // Match over?
+  const matchWinner = lb.find((e) => e.score >= MATCH_WIN_SCORE);
+  if (matchWinner) {
+    roundState = ROUND_MATCH_END;
+    roundTimer = 10;
+    console.log(`[server] MATCH END — ${matchWinner.id.slice(0,4)} wins match`);
+  }
+}
+
 // ----------------------------------------------------------------- Player state
-const players = new Map(); // id -> player state
+const players = new Map();
 
 function createPlayer(id) {
-  const spawn = [0, 1, 10];
+  ensureScore(id);
+  const spawn = players.size === 0 ? [0, 1, 10] : [0, 1, -10];
   return {
-    id,
-    pos: [...spawn],
-    vel: [0, 0, 0],
-    yaw: 0,
-    pitch: 0,
-    health: C.DEFAULT_HEALTH,
-    maxHealth: C.DEFAULT_HEALTH,
-    // Position history for lag compensation: [{t, pos:[x,y,z]}]
-    history: [],
-    lastInput: null,
-    lastSeen: now(),
+    id, pos: [...spawn], vel: [0, 0, 0], yaw: 0, pitch: 0,
+    health: C.DEFAULT_HEALTH, maxHealth: C.DEFAULT_HEALTH,
+    history: [], lastInput: null, lastSeen: now(), alive: true,
   };
 }
 
 function recordHistory(p) {
   const t = now();
   p.history.push({ t, pos: [...p.pos] });
-  // Trim history older than POSITION_HISTORY_MS
   const cutoff = t - POSITION_HISTORY_MS;
-  while (p.history.length > 1 && p.history[0].t < cutoff) {
-    p.history.shift();
-  }
+  while (p.history.length > 1 && p.history[0].t < cutoff) p.history.shift();
 }
 
-/** Get player position rewound to a given time (lag compensation). */
 function rewindPosition(p, rewindMs) {
   const targetT = now() - rewindMs;
   let best = p.history[0];
@@ -117,21 +167,19 @@ function rewindPosition(p, rewindMs) {
 // ----------------------------------------------------------------- Message handling
 function handleJoin(ws, payload) {
   const id = payload.clientId || Math.random().toString(36).slice(2);
-  if (players.has(id)) {
-    ws.send(JSON.stringify({ type: 'error', code: 'id_taken' }));
-    return;
-  }
+  if (players.has(id)) { ws.send(JSON.stringify({ type: 'error', code: 'id_taken' })); return; }
   const p = createPlayer(id);
   players.set(id, p);
   ws.playerId = id;
   ws.send(JSON.stringify({
-    type: 'joined',
-    playerId: id,
-    spawn: p.pos,
-    health: p.health,
-    tickRate: NET.TICK_RATE,
+    type: 'joined', playerId: id, spawn: p.pos, health: p.health,
+    tickRate: NET.TICK_RATE, roundState, roundTimer,
+    scores: Object.fromEntries(scores), matchWinScore: MATCH_WIN_SCORE,
+    currentMap,
   }));
   console.log(`[server] player joined: ${id} (${players.size} total)`);
+  // If we have 2 players and in lobby, start a round shortly
+  if (players.size >= 2 && roundState === ROUND_LOBBY) startIntermission();
 }
 
 function handleInput(ws, payload) {
@@ -140,15 +188,15 @@ function handleInput(ws, payload) {
   p.lastInput = {
     w: !!payload.w, a: !!payload.a, s: !!payload.s, d: !!payload.d,
     shift: !!payload.shift, crouch: !!payload.crouch, jump: !!payload.jump,
-    yaw: payload.yaw, pitch: payload.pitch,
-    t: payload.t || now(),
+    yaw: payload.yaw, pitch: payload.pitch, t: payload.t || now(),
   };
   p.lastSeen = now();
 }
 
 function handleFire(ws, payload) {
   const shooter = players.get(ws.playerId);
-  if (!shooter) return;
+  if (!shooter || !shooter.alive) return;
+  if (roundState !== ROUND_ACTIVE) return;
 
   const weaponKey = payload.weaponKey || 'ASSAULT_RIFLE';
   const w = W[weaponKey];
@@ -158,76 +206,54 @@ function handleFire(ws, payload) {
   const clientLatency = Math.max(0, nowMs - (payload.t || nowMs));
   const rewindMs = Math.min(clientLatency, MAX_REWIND_MS);
 
-  // --- Lag compensation: rewind target positions ---
   const hitTargetId = payload.hitTargetId;
-  const hitPosition = payload.hitPosition; // [x,y,z] client-reported
-  const origin = payload.origin; // [x,y,z] client eye position
+  const hitPosition = payload.hitPosition;
+  const origin = payload.origin;
 
+  // Lag compensation: rewind target
   let targetPos = null;
   if (hitTargetId) {
     const target = players.get(hitTargetId);
-    if (target) {
-      targetPos = rewindPosition(target, rewindMs);
-    }
+    if (target) targetPos = rewindPosition(target, rewindMs);
   }
 
-  // --- Sanity check: reported hit position within reasonable distance of target ---
+  // Sanity check distance
   if (targetPos) {
     const d = dist3(hitPosition, targetPos);
-    // tolerance: target may have moved between rewind and now; allow ~3m
     if (d > 3.0) {
-      console.log(`[server] reject fire: hit pos ${d.toFixed(2)}m from rewound target`);
       ws.send(JSON.stringify({ type: 'hit_rejected', reason: 'hit_too_far' }));
       return;
     }
   }
 
-  // --- Server re-raycast from shooter's (rewound) position toward hit position ---
+  // Server re-raycast obstruction check
   const shooterPos = rewindPosition(shooter, rewindMs);
-  const dir = [
-    hitPosition[0] - shooterPos[0],
-    hitPosition[1] - shooterPos[1],
-    hitPosition[2] - shooterPos[2],
-  ];
-  const len = Math.sqrt(dir[0]**2 + dir[1]**2 + dir[2]**2) || 1;
+  const dir = [hitPosition[0]-shooterPos[0], hitPosition[1]-shooterPos[1], hitPosition[2]-shooterPos[2]];
+  const len = Math.sqrt(dir[0]**2+dir[1]**2+dir[2]**2) || 1;
   const nDir = [dir[0]/len, dir[1]/len, dir[2]/len];
-
   const obstruction = serverRaycast(shooterPos, nDir);
   if (obstruction && obstruction.t < len - 0.5) {
-    // Something solid between shooter and hit point (not the target itself)
-    console.log(`[server] reject fire: obstructed by ${obstruction.obstacle} at t=${obstruction.t.toFixed(2)}`);
     ws.send(JSON.stringify({ type: 'hit_rejected', reason: 'obstructed' }));
     return;
   }
 
-  // --- Apply damage (authoritative; never trust client damage) ---
+  // Apply authoritative damage
   const dmg = w.damage ? w.damage.start : C.DEFAULT_HEALTH / 2;
   if (hitTargetId) {
     const target = players.get(hitTargetId);
-    if (target) {
+    if (target && target.alive) {
       target.health = Math.max(0, target.health - dmg);
-      console.log(`[server] ${shooter.id} hit ${target.id} for ${dmg} → ${target.health}`);
-      // Notify both
-      ws.send(JSON.stringify({
-        type: 'hit_confirmed',
-        targetId: hitTargetId,
-        damage: dmg,
-        targetHealth: target.health,
-      }));
-      const targetWs = Array.from(wsServer.clients).find(c => c.playerId === hitTargetId);
-      if (targetWs && targetWs.readyState === WebSocket.OPEN) {
-        targetWs.send(JSON.stringify({
-          type: 'damage_taken',
-          damage: dmg,
-          health: target.health,
-          attackerId: shooter.id,
-        }));
-      }
+      console.log(`[server] ${shooter.id.slice(0,4)} hit ${target.id.slice(0,4)} for ${dmg} → ${target.health}`);
+      ws.send(JSON.stringify({ type: 'hit_confirmed', targetId: hitTargetId, damage: dmg, targetHealth: target.health }));
+      const tWs = Array.from(wsServer.clients).find(c => c.playerId === hitTargetId);
+      if (tWs && tWs.readyState === WebSocket.OPEN)
+        tWs.send(JSON.stringify({ type: 'damage_taken', damage: dmg, health: target.health, attackerId: shooter.id }));
+
       if (target.health <= 0) {
-        target.health = target.maxHealth;
-        target.pos = [0, 1, 10]; // respawn
-        target.history = [];
-        ws.send(JSON.stringify({ type: 'elimination', victimId: hitTargetId }));
+        target.alive = false;
+        target.health = 0;
+        // Round over: shooter wins the round
+        endRound(shooter.id);
       }
     }
   }
@@ -236,9 +262,16 @@ function handleFire(ws, payload) {
 // ----------------------------------------------------------------- Simulation tick (20 Hz)
 function simulate() {
   const dt = 1 / NET.TICK_RATE;
-  for (const p of players.values()) {
-    // Apply client input with server-side movement validation
-    if (p.lastInput) {
+
+  // Round state machine transitions
+  if (roundState === ROUND_INTERMISSION) {
+    roundTimer -= dt;
+    if (roundTimer <= 0) startRound();
+  } else if (roundState === ROUND_ACTIVE) {
+    roundTimer -= dt;
+    // Apply player movement
+    for (const p of players.values()) {
+      if (!p.alive || !p.lastInput) continue;
       const input = p.lastInput;
       const speed = input.shift ? M.SPRINT_SPEED : M.WALK_SPEED;
       const move = [0, 0, 0];
@@ -251,41 +284,50 @@ function simulate() {
       const mLen = Math.sqrt(move[0]**2+move[1]**2+move[2]**2);
       if (mLen > 0) {
         move[0]/=mLen; move[1]/=mLen; move[2]/=mLen;
-        p.pos[0]+=move[0]*speed*dt;
-        p.pos[1]+=move[1]*speed*dt;
-        p.pos[2]+=move[2]*speed*dt;
+        p.pos[0]+=move[0]*speed*dt; p.pos[1]+=move[1]*speed*dt; p.pos[2]+=move[2]*speed*dt;
       }
-      p.yaw = input.yaw;
-      p.pitch = input.pitch;
+      p.yaw = input.yaw; p.pitch = input.pitch;
     }
-
-    // --- Server-side speed validation / anti-cheat ---
-    // (recorded below; displacement checked against MAX_SPEED*dt*1.5)
-    recordHistory(p);
+    recordAllHistory();
+    // Round timeout
+    if (roundTimer <= 0) {
+      // Time up: no winner (or handle draw)
+      endRound(null);
+    }
+  } else if (roundState === ROUND_END) {
+    roundTimer -= dt;
+    if (roundTimer <= 0) {
+      if (roundState !== ROUND_MATCH_END) startIntermission();
+    }
+  } else if (roundState === ROUND_MATCH_END) {
+    roundTimer -= dt;
+    if (roundTimer <= 0) startIntermission(); // rematch
+  } else if (roundState === ROUND_LOBBY) {
+    // waiting for players
   }
+}
+
+function recordAllHistory() {
+  for (const p of players.values()) recordHistory(p);
 }
 
 // ----------------------------------------------------------------- Snapshot broadcast
 function broadcastSnapshot(wsServer) {
   const snapshot = {
-    type: 'snapshot',
-    t: now(),
+    type: 'snapshot', t: now(), roundState, roundTimer,
+    scores: Object.fromEntries(scores), roundWinnerId,
+    matchWinScore: MATCH_WIN_SCORE, currentMap,
     players: [],
   };
   for (const p of players.values()) {
     snapshot.players.push({
-      id: p.id,
-      pos: p.pos,
-      yaw: p.yaw,
-      pitch: p.pitch,
-      health: p.health,
+      id: p.id, pos: p.pos, yaw: p.yaw, pitch: p.pitch,
+      health: p.health, alive: p.alive,
     });
   }
   const msg = JSON.stringify(snapshot);
   for (const client of wsServer.clients) {
-    if (client.readyState === WebSocket.OPEN) {
-      client.send(msg);
-    }
+    if (client.readyState === WebSocket.OPEN) client.send(msg);
   }
 }
 
@@ -304,14 +346,17 @@ wsServer.on('connection', (ws) => {
         case 'fire': handleFire(ws, msg); break;
         default: console.log('[server] unknown message:', msg.type);
       }
-    } catch (e) {
-      console.error('[server] bad message:', e.message);
-    }
+    } catch (e) { console.error('[server] bad message:', e.message); }
   });
   ws.on('close', () => {
     if (ws.playerId) {
       players.delete(ws.playerId);
+      scores.delete(ws.playerId);
       console.log(`[server] player left: ${ws.playerId} (${players.size} total)`);
+      if (players.size < 2 && roundState !== ROUND_LOBBY) {
+        roundState = ROUND_LOBBY;
+        console.log('[server] not enough players, back to LOBBY');
+      }
     }
   });
   ws.on('error', (e) => console.error('[server] ws error:', e.message));

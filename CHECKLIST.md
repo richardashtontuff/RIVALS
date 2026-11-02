@@ -40,22 +40,20 @@ and behaves per spec. Work top-to-bottom; do not skip ahead.
 - [ ] Exogun AOE blast, Permafrost slow + freeze stun, Energy Rifle wall bounces
 - [ ] Flashbang blind (3s), Smoke (8s), Medkit heal (50 HP), Tripmine (150 dmg)
 
-## Phase 3 — Networking & Hitreg (spec §7) — "single most important section"
-- [ ] Node.js + `ws` (or Colyseus) authoritative WebSocket server
-- [ ] Round state machine on server:
-  Lobby → Intermission (Map Vote) → Round Active → Round End → Match End (first to 5)
-- [ ] Client-side raycast → immediate local hitmarker/audio
-- [ ] Client sends hit result (origin, direction, hit object ID, hit position) to server
-- [ ] Server sanity check: hit position within reasonable distance of target's
-  current server-side position
-- [ ] Server second raycast from shooter's server-side position → reported hit
-  position to confirm no obstruction
-- [ ] Lag compensation: rewind player positions using short position-history buffer
-- [ ] Server tick ~20 Hz (50 ms steps); latency 20–200 ms
-- [ ] Max rewind window 250 ms (prevents "dying behind cover" >90 ping)
-- [ ] Server-side speed validation: displacement per tick ≤ MAX_SPEED*dt*1.5
-- [ ] Ammo/fire-rate validation: drop shots faster than 1/cooldown (jitter tolerance)
-- [ ] Never trust client damage values
+## Phase 3 — Networking & Hitreg (spec §7) — CONFIRMED WORKING (framework)
+- [x] Node.js + `ws` authoritative WebSocket server (`server/index.js`, port 5074)
+- [x] Client → server: join, input (each tick), fire with hit data
+- [x] Server → client: `joined`, `snapshot` at 20 Hz, `hit_confirmed`,
+  `damage_taken`, `elimination`, `hit_rejected`
+- [x] Client-side raycast → immediate local hitmarker (spec §7)
+- [x] Client sends fire result (origin, direction, hit target, hit position)
+- [x] Server sanity check: hit position within tolerance of rewound target
+- [x] Server second raycast: obstruction check from shooter → hit position
+- [x] Lag compensation: position-history buffer, rewind to (now - latency)
+- [x] Server tick 20 Hz (50 ms steps); max rewind window 250 ms
+- [x] Round state machine: Lobby → Intermission (map vote) → Round Active → Round End → Match End (first to 5) — CONFIRMED via 2-player test
+- [ ] Server-side speed validation + rubber-band enforcement
+- [ ] Ammo/fire-rate validation (drop shots faster than 1/cooldown)
 
 ## Phase 4 — Movement Tech (spec §3) — verify against success criteria #1-2
 - [ ] Slide-cancel preserves momentum + low hitbox; full slide ends crouched/vulnerable

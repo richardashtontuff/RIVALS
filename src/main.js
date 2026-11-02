@@ -67,6 +67,32 @@ Object.assign(netStatus.style, {
 netStatus.textContent = 'connecting to server...';
 document.body.appendChild(netStatus);
 
+// Round state UI (spec §1)
+const roundUI = document.createElement('div');
+roundUI.id = 'roundUI';
+Object.assign(roundUI.style, {
+  position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)',
+  color: '#fff', fontSize: '1.5rem', pointerEvents: 'none', userSelect: 'none',
+  textShadow: '0 0 10px rgba(0,0,0,0.9)', textAlign: 'center', display: 'none',
+});
+const roundStateEl = document.createElement('div');
+roundStateEl.id = 'roundStateEl';
+const roundTimerEl = document.createElement('div');
+roundTimerEl.id = 'roundTimerEl';
+const roundScoreEl = document.createElement('div');
+roundScoreEl.id = 'roundScoreEl';
+roundScoreEl.style.fontSize = '1rem';
+roundScoreEl.style.opacity = '0.85';
+const roundMatchEl = document.createElement('div');
+roundMatchEl.id = 'roundMatchEl';
+roundMatchEl.style.fontSize = '0.95rem';
+roundMatchEl.style.marginTop = '6px';
+roundUI.appendChild(roundStateEl);
+roundUI.appendChild(roundTimerEl);
+roundUI.appendChild(roundScoreEl);
+roundUI.appendChild(roundMatchEl);
+document.body.appendChild(roundUI);
+
 // ------------------------------------------------------------------ Three.js
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0xe8e8e8);
@@ -162,10 +188,8 @@ function connect() {
         C.DEFAULT_HEALTH = Math.max(0, msg.health);
         hpEl.textContent = `HP ${C.DEFAULT_HEALTH}`;
         if (msg.health <= 0) {
-          netStatus.textContent = 'eliminated — respawning...';
-          setTimeout(() => {
-            socket.send(JSON.stringify({ type: 'input', t: now(), w: input.w, a: input.a, s: input.s, d: input.d, yaw: mc.yaw, pitch: mc.pitch }));
-          }, 1500);
+          myAlive = false;
+          netStatus.textContent = 'eliminated — awaiting next round';
         }
         break;
       case 'hit_rejected':
@@ -188,7 +212,59 @@ function connect() {
 }
 connect();
 
+let roundState = 'LOBBY';
+let roundTimer = 0;
+const scores = {};
+let matchWinScore = 5;
+let roundWinnerId = null;
+let myAlive = true;
+
+function updateRoundUI() {
+  roundUI.style.display = 'block';
+  let stateText = roundState;
+  if (roundState === 'ROUND_ACTIVE') stateText = 'ROUND ACTIVE';
+  else if (roundState === 'ROUND_INTERMISSION') stateText = 'INTERMISSION';
+  else if (roundState === 'ROUND_END') stateText = roundWinnerId === myPlayerId ? 'ROUND WON' : 'ROUND LOST';
+  else if (roundState === 'ROUND_MATCH_END') stateText = 'MATCH END';
+  else if (roundState === 'LOBBY') stateText = 'LOBBY';
+  roundStateEl.textContent = stateText;
+  roundTimerEl.textContent = `round timer: ${Math.ceil(roundTimer)}s`;
+  const lb = leaderboard();
+  roundScoreEl.textContent = lb.map(e => `${e.id.slice(0,4)}: ${e.score}`).join('  ');
+  // Match point / sudden death indicators (spec §1: network-replicated)
+  let matchText = '';
+  if (roundState === 'ROUND_MATCH_END') {
+    matchText = 'MATCH OVER';
+  } else {
+    const me = scores[myPlayerId] || 0;
+    const opponent = Math.max(...Object.values(scores).filter((_,i)=>true));
+    if (me >= matchWinScore - 1) matchText = 'MATCH POINT';
+    if (me === opponent && me >= matchWinScore - 1) matchText = 'SUDDEN DEATH';
+  }
+  roundMatchEl.textContent = matchText;
+  // Visual indicators per spec §1
+  if (matchText === 'SUDDEN DEATH') {
+    roundMatchEl.style.color = '#ff0000';
+    document.body.style.background = 'rgba(255,0,0,0.15)';
+  } else if (me >= matchWinScore - 1) {
+    roundMatchEl.style.color = '#ffaa00';
+    document.body.style.background = '';
+  } else {
+    roundMatchEl.style.color = '#aaa';
+    document.body.style.background = '';
+  }
+}
+
+function leaderboard() {
+  return Object.entries(scores).map(([id, s]) => ({ id, score: s })).sort((a, b) => b.score - a.score);
+}
+
 function onSnapshot(msg) {
+  roundState = msg.roundState || roundState;
+  roundTimer = msg.roundTimer;
+  roundWinnerId = msg.roundWinnerId;
+  matchWinScore = msg.matchWinScore || 5;
+  Object.assign(scores, msg.scores || {});
   const nowTs = msg.t;
   const incomingIds = new Set();
   for (const p of msg.players) {
@@ -198,6 +274,8 @@ function onSnapshot(msg) {
       mc.position.set(p.pos[0], p.pos[1], p.pos[2]);
       mc.yaw = p.yaw || mc.yaw;
       mc.pitch = p.pitch || mc.pitch;
+      myAlive = p.alive;
+      if (!myAlive) netStatus.textContent = 'eliminated — awaiting next round';
       continue;
     }
     let entry = remotePlayers.get(p.id);
@@ -222,6 +300,7 @@ function onSnapshot(msg) {
       remotePlayers.delete(id);
     }
   }
+  updateRoundUI();
 }
 
 function sendInput() {
@@ -378,6 +457,8 @@ function cancelReload() {
 }
 
 function fireWeapon() {
+  // Only fire during an active round and while alive (spec §1 round state)
+  if (roundState !== 'ROUND_ACTIVE' || !myAlive) return;
   const key = currentWeaponKey();
   const w = W[key];
   if (!w) return;
