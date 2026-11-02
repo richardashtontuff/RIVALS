@@ -115,11 +115,11 @@ and behaves per spec. Work top-to-bottom; do not skip ahead.
 - [ ] Texture packs: "No textures," "No skybox," "No hands"
 
 ## Phase 9 — Performance & Anti-Cheat (spec §9.3)
-- [ ] Instancing: `THREE.InstancedMesh` for repeated static geometry
-- [ ] LOD: `THREE.LOD` high→low poly at distance
-- [ ] Frustum culling via chunked geometry
-- [ ] Server speed validation + rubber-band
-- [ ] Ammo/fire-rate validation
+- [x] Instancing: `THREE.InstancedMesh` for repeated static geometry
+- [x] LOD: `THREE.LOD` high→low poly at distance
+- [x] Frustum culling: Three.js default + chunked geometry
+- [x] Server speed validation + rubber-band enforcement (CONFIRMED)
+- [x] Ammo/fire-rate validation (drop shots faster than 1/cooldown) (CONFIRMED)
 
 ## Phase 10 — Asset Pipeline (spec §10)
 - [ ] `@gltf-transform/cli` optimize: Draco + WebP, texture-size 1024

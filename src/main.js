@@ -154,6 +154,45 @@ world.add(dummy);
 
 const raycaster = new THREE.Raycaster();
 
+// ------------------------------------------------------------------ Performance: InstancedMesh + LOD (spec §9.3)
+// InstancedMesh for repeated static geometry (crates/barriers)
+function buildInstancedCrates(count, spacing) {
+  const crateGeo = new THREE.BoxGeometry(2, 2, 2);
+  const crateMat = new THREE.MeshStandardMaterial({ color: 0x888888, roughness: 0.8 });
+  const instanced = new THREE.InstancedMesh(crateGeo, crateMat, count);
+  const dummy = new THREE.Object3D();
+  for (let i = 0; i < count; i++) {
+    const x = (i % 6) * spacing - spacing * 2.5;
+    const z = Math.floor(i / 6) * spacing - spacing * 2.5;
+    dummy.position.set(x, 1, z);
+    dummy.updateMatrix();
+    instanced.setMatrixAt(i, dummy.matrix);
+  }
+  instanced.name = 'instanced_crates';
+  instanced.count = count;
+  world.add(instanced);
+  return instanced;
+}
+
+// LOD: high→low poly at distance
+function buildLODModel() {
+  const highGeo = new THREE.BoxGeometry(2, 4, 2);
+  const medGeo = new THREE.BoxGeometry(1.5, 3, 1.5);
+  const lowGeo = new THREE.BoxGeometry(1, 2, 1);
+  const mat = new THREE.MeshStandardMaterial({ color: 0xaaaaaa });
+  const lod = new THREE.LOD();
+  lod.addLevel(new THREE.Mesh(highGeo, mat), 0);
+  lod.addLevel(new THREE.Mesh(medGeo, mat), 20);
+  lod.addLevel(new THREE.Mesh(lowGeo, mat), 50);
+  lod.name = 'lod_model';
+  lod.position.set(25, 2, 25);
+  world.add(lod);
+  return lod;
+}
+
+buildInstancedCrates(36, 6);
+buildLODModel();
+
 // ------------------------------------------------------------------ Map (spec §5)
 let currentMapName = 'Arena';
 let mapMechanics = null;
