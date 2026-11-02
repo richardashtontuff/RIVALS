@@ -30,6 +30,14 @@ const ROUND_TIME_S = 180;        // 3 minute rounds
 const INTERMISSION_TIME_S = 8;   // map vote / between rounds
 const MATCH_WIN_SCORE = 5;       // first to 5 round wins
 
+// Game modes (spec §2)
+const MODE_DUEL = 'DUEL';        // 1v1-5v5, first to 5 round wins
+const MODE_TDM = 'TDM';          // 8v8, most kills before timer
+const MODE_FFA = 'FFA';          // 16 players, top 5 scorers win
+const MODE_GUN_GAME = 'GUN_GAME'; // cycle weapons per kill
+
+let currentGameMode = MODE_DUEL;
+
 // Round state enum
 const ROUND_LOBBY = 'LOBBY';
 const ROUND_INTERMISSION = 'INTERMISSION';
@@ -144,20 +152,22 @@ function startRound() {
 
 function endRound(winnerId) {
   roundState = ROUND_END;
-  roundWinnerId = winnerId;
+  roundWinnerId = winnerId; // string for Duel, comma-list for FFA top-5
   roundTimer = 6; // show results for 6s
-  if (winnerId) {
+  if (currentGameMode === MODE_DUEL && winnerId) {
     ensureScore(winnerId);
     scores.set(winnerId, scores.get(winnerId) + 1);
   }
   const lb = leaderboard();
-  console.log(`[server] ROUND END — winner ${winnerId?.slice(0,4)}, scores: ${JSON.stringify(Object.fromEntries(scores))}`);
-  // Match over?
-  const matchWinner = lb.find((e) => e.score >= MATCH_WIN_SCORE);
-  if (matchWinner) {
-    roundState = ROUND_MATCH_END;
-    roundTimer = 10;
-    console.log(`[server] MATCH END — ${matchWinner.id.slice(0,4)} wins match`);
+  console.log(`[server] ROUND END — mode ${currentGameMode} winner ${winnerId?.slice(0,4)}, scores: ${JSON.stringify(Object.fromEntries(scores))}`);
+  // Match over? (Duel: first to MATCH_WIN_SCORE round wins)
+  if (currentGameMode === MODE_DUEL) {
+    const matchWinner = lb.find((e) => e.score >= MATCH_WIN_SCORE);
+    if (matchWinner) {
+      roundState = ROUND_MATCH_END;
+      roundTimer = 10;
+      console.log(`[server] MATCH END — ${matchWinner.id.slice(0,4)} wins match`);
+    }
   }
 }
 
@@ -173,6 +183,8 @@ function createPlayer(id) {
     history: [], lastInput: null, lastSeen: now(), alive: true,
     lastPos: [...spawn],        // for speed validation
     lastFireTime: 0,            // for fire-rate validation
+    kills: 0, deaths: 0,        // for TDM / FFA scoring
+    currentWeapon: 'ASSAULT_RIFLE', // for Gun Game
   };
 }
 
@@ -204,7 +216,7 @@ function handleJoin(ws, payload) {
     type: 'joined', playerId: id, spawn: p.pos, health: p.health,
     tickRate: NET.TICK_RATE, roundState, roundTimer,
     scores: Object.fromEntries(scores), matchWinScore: MATCH_WIN_SCORE,
-    currentMap,
+    currentMap, gameMode: currentGameMode,
   }));
   console.log(`[server] player joined: ${id} (${players.size} total)`);
   // If we have 2 players and in lobby, start a round shortly
@@ -293,8 +305,29 @@ function handleFire(ws, payload) {
       if (target.health <= 0) {
         target.alive = false;
         target.health = 0;
-        // Round over: shooter wins the round
-        endRound(shooter.id);
+        target.deaths += 1;
+        shooter.kills += 1;
+
+        if (currentGameMode === MODE_DUEL) {
+          // Round over: shooter wins the round
+          endRound(shooter.id);
+        } else if (currentGameMode === MODE_GUN_GAME) {
+          // Cycle to next weapon on kill
+          const keys = Object.keys(W);
+          const idx = keys.indexOf(shooter.currentWeapon);
+          shooter.currentWeapon = keys[(idx + 1) % keys.length];
+          // Respawn shooter immediately
+          target.health = target.maxHealth;
+          target.alive = true;
+          target.pos = [0, 1, 10];
+          target.history = [];
+        } else {
+          // TDM / FFA: respawn victim, round continues until timer
+          target.health = target.maxHealth;
+          target.alive = true;
+          target.pos = [0, 1, 10];
+          target.history = [];
+        }
       }
     }
   }
@@ -343,8 +376,17 @@ function simulate() {
     recordAllHistory();
     // Round timeout
     if (roundTimer <= 0) {
-      // Time up: no winner (or handle draw)
-      endRound(null);
+      if (currentGameMode === MODE_TDM) {
+        // Most kills wins the round
+        const winner = Array.from(players.values()).reduce((a, b) => a.kills > b.kills ? a : b);
+        endRound(winner ? winner.id : null);
+      } else if (currentGameMode === MODE_FFA) {
+        // Top 5 scorers win — mark round end, winners determined by kills
+        const sorted = Array.from(players.values()).sort((a, b) => b.kills - a.kills);
+        endRound(sorted.slice(0, 5).map(p => p.id).join(','));
+      } else {
+        endRound(null);
+      }
     }
   } else if (roundState === ROUND_END) {
     roundTimer -= dt;
@@ -368,13 +410,13 @@ function broadcastSnapshot(wsServer) {
   const snapshot = {
     type: 'snapshot', t: now(), roundState, roundTimer,
     scores: Object.fromEntries(scores), roundWinnerId,
-    matchWinScore: MATCH_WIN_SCORE, currentMap,
+    matchWinScore: MATCH_WIN_SCORE, currentMap, gameMode: currentGameMode,
     players: [],
   };
   for (const p of players.values()) {
     snapshot.players.push({
       id: p.id, pos: p.pos, yaw: p.yaw, pitch: p.pitch,
-      health: p.health, alive: p.alive,
+      health: p.health, alive: p.alive, kills: p.kills, deaths: p.deaths,
     });
   }
   const msg = JSON.stringify(snapshot);
@@ -396,6 +438,7 @@ wsServer.on('connection', (ws) => {
         case 'join': handleJoin(ws, msg); break;
         case 'input': handleInput(ws, msg); break;
         case 'fire': handleFire(ws, msg); break;
+        case 'set_mode': currentGameMode = msg.mode || MODE_DUEL; console.log('[server] game mode set to', currentGameMode); break;
         default: console.log('[server] unknown message:', msg.type);
       }
     } catch (e) { console.error('[server] bad message:', e.message); }

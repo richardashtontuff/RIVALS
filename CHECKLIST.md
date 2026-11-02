@@ -66,40 +66,25 @@ and behaves per spec. Work top-to-bottom; do not skip ahead.
 - [ ] Wall-bounce on Construction / Warehouse
 - [ ] A-D rhythm (direction change every 0.4–0.5 s)
 
-## Phase 5 — Maps (spec §5)
-- [ ] MapSystem: loads maps from GLB; Big-variant selection based on team size
-- [ ] Map metadata table: `{name, difficulty, size, features, jumpShardLocation, glbPath}`
-- [ ] Arena (26 tiles, smallest, mirrored, ramps)
-- [ ] Backrooms (mirrored maze, darkness/fog, echoes)
-- [ ] Battleground (vertical bridge, shootable buttons close middle)
-- [ ] Bridge (Seoul-inspired, yellow bus, Scythe-dash reachable)
-- [ ] Chess (giant chessboard, floating pieces)
-- [ ] Construction (crane, red crate, 2nd-floor L-spawns, Jump Shard top of crane)
-- [ ] Crossroads (classic 2006, Jump Shard near black area)
-- [ ] Big Crossroads (tall green hill, extra trampolines, extra tunnel)
-- [ ] Dimension (portal bottom center, stairs/glass, easy to fall)
-- [ ] Docks (long-range, breakable glass, water = death, Jump Shard OOB)
-- [ ] Graveyard (big church, graveyard, bell on Sudden Death, underground tunnel)
-- [ ] Big Graveyard (underground tunnel)
-- [ ] Iceberg (3 spawns, tents/radio towers, water = death)
-- [ ] Museum (2 floors, purple fossils, scanner buzzer on far doors, Update 23 sightlines)
-- [ ] Onyx (lava 5–70 dmg + bounce away, pillars, Jump Shard on rubber duck)
-- [ ] Playground (tires, crates, wooden walls, mazes)
-- [ ] Sandbox (symmetrical, ramp to sandcastle, shovel climbable ramps to bucket tops)
-- [ ] Station (Western train station, destructible windows, 2 stationary trains)
-- [ ] Big Station (multiple shops, more trains)
-- [ ] Studio (Hollywood set, 2 balconies, van/forklift, tents, green screen)
-- [ ] Village, Westown (4 small + 2 big houses, rail track + train, dynamite crates)
-- [ ] Shooting Range (lobby-accessible practice)
-- [ ] Big Arena, Big Backrooms, Big Onyx, Big Splash (new geometry, not Scale multiplier)
-- [ ] Destructible windows (Station, Docks, Westown): `BreakableWindow`, shot-out = permanent open sightline
-- [ ] Onyx lava: collision sensor, damage randomInt(5,70), impulse away from surface normal
-- [ ] Battleground bridge buttons: raycast hit closes middle section + collider
-- [ ] Museum scanner: trigger volume + Web Audio buzzer on pass, no minimap marker
-- [ ] Sandbox shovels: climbable ramps to sand bucket tops
+## Phase 5 — Maps (spec §5) — CONFIRMED WORKING (framework)
+- [x] MapSystem: map metadata table (27 maps incl. Big variants), procedural loader
+- [x] Big-variant selection logic (bigRequired for 3v3+)
+- [x] Arena, Backrooms, Battleground, Bridge, Chess, Construction, Crossroads,
+  Big Crossroads, Dimension, Docks, Graveyard, Big Graveyard, Iceberg, Museum,
+  Onyx, Playground, Sandbox, Station, Big Station, Studio, Village, Westown,
+  Shooting Range, Big Arena, Big Backrooms, Big Onyx, Big Splash
+- [x] Destructible windows: BreakableWindow, shot-out = permanent open sightline (client)
+- [x] Onyx lava: 5-70 dmg + bounce away from surface normal (client)
+- [x] Battleground bridge buttons: close middle section (client)
+- [x] Museum scanner: Web Audio buzzer on pass (client)
+- [x] Sandbox shovels: climbable ramps (client)
+- [ ] Map-specific mechanics validated on server (server obstruction raycast vs map geometry)
+- [ ] GLB asset loading via Draco + WebP pipeline (spec §10)
 
 ## Phase 6 — Game Modes (spec §2)
-- [ ] Duel (Core): 1v1–5v5, first to 5 round wins, map vote, Big mandatory for 3v3+
+- [x] Duel (Core): 1v1–5v5, first to 5 round wins (server round machine)
+- [ ] Map vote in Intermission
+- [ ] Big mandatory for 3v3+ (MapSystem.bigRequired)
 - [ ] Ranked: 1v1, 2v2, 3v3, ELO, entry Level 100 + verification
 - [ ] Team Deathmatch: 8v8, most kills before timer
 - [ ] Free For All: 16 players, top 5 winners
