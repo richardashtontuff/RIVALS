@@ -219,6 +219,7 @@ function connect() {
         break;
       case 'elimination':
         if (msg.victimId === myPlayerId) netStatus.textContent = 'eliminated';
+        if (msg.attackerId) addKillfeed(msg.attackerId, msg.victimId);
         break;
       case 'error':
         netStatus.textContent = `error: ${msg.code}`;
@@ -492,6 +493,128 @@ const weaponSystem = new WeaponSystem(mc, scene, world, {
   getRemotePlayers: () => remotePlayers,
 });
 socket.weaponSystem = weaponSystem;
+
+// ------------------------------------------------------------------ Kill feed (spec §8.4)
+const killfeedEl = document.getElementById('killfeed');
+const killfeed = [];
+function addKillfeed(attacker, victim) {
+  killfeed.unshift({ attacker, victim, t: now() });
+  if (killfeed.length > 6) killfeed.pop();
+  renderKillfeed();
+}
+function renderKillfeed() {
+  const t = now();
+  killfeedEl.innerHTML = killfeed
+    .filter((e) => t - e.t < 5000)
+    .map((e) => `<div style="margin:2px 0"><span style="color:#44ff44">${e.attacker.slice(0,4)}</span> <span style="color:#888">eliminated</span> <span style="color:#ff4444">${e.victim.slice(0,4)}</span></div>`)
+    .join('');
+}
+
+// ------------------------------------------------------------------ Settings (spec §8.2)
+const settingsEl = document.getElementById('settings');
+const closeSettings = document.getElementById('closeSettings');
+const resetSettings = document.getElementById('resetSettings');
+const setFov = document.getElementById('setFov');
+const setSens = document.getElementById('setSens');
+const setCrossColor = document.getElementById('setCrossColor');
+const setCrossThick = document.getElementById('setCrossThick');
+const setCrossOutline = document.getElementById('setCrossOutline');
+const setCrossStatic = document.getElementById('setCrossStatic');
+const setGraphics = document.getElementById('setGraphics');
+const setMaxFps = document.getElementById('setMaxFps');
+
+const settings = {
+  fov: UI.FOV,
+  sensitivity: 1.0,
+  crossColor: UI.CROSSHAIR_DOT_COLOR,
+  crossThickness: UI.CROSSHAIR_DOT_THICKNESS,
+  crossOutline: UI.CROSSHAIR_OUTLINE_TYPE || 'round',
+  crossStatic: UI.CROSSHAIR_STATIC,
+  graphics: 'medium',
+  maxFps: 144,
+};
+
+function openSettings() {
+  settingsEl.style.display = 'flex';
+  setFov.value = settings.fov;
+  setSens.value = settings.sensitivity;
+  setCrossColor.value = settings.crossColor;
+  setCrossThick.value = settings.crossThickness;
+  setCrossOutline.value = settings.crossOutline;
+  setCrossStatic.checked = settings.crossStatic;
+  setGraphics.value = settings.graphics;
+  setMaxFps.value = settings.maxFps || 144;
+  // pause input while settings open
+  document.exitPointerLock();
+}
+function closeSettingsMenu() {
+  settingsEl.style.display = 'none';
+  canvasEl.requestPointerLock();
+}
+function applySettings() {
+  settings.fov = parseInt(setFov.value, 10);
+  settings.sensitivity = parseFloat(setSens.value);
+  settings.crossColor = setCrossColor.value;
+  settings.crossThickness = parseInt(setCrossThick.value, 10);
+  settings.crossOutline = setCrossOutline.value;
+  settings.crossStatic = setCrossStatic.checked;
+  settings.graphics = setGraphics.value;
+  settings.maxFps = parseInt(setMaxFps.value, 10) || 0;
+  camera.fov = settings.fov;
+  camera.updateProjectionMatrix();
+  // Apply crosshair
+  crosshairDot.style.background = settings.crossColor;
+  crosshairDot.style.width = settings.crossThickness + 'px';
+  crosshairDot.style.height = settings.crossThickness + 'px';
+  if (settings.crossOutline === 'none') {
+    crosshairDot.style.boxShadow = 'none';
+  } else {
+    crosshairDot.style.boxShadow = `0 0 0 ${Math.max(2, settings.crossThickness/2)}px #000000`;
+  }
+  // Graphics quality
+  if (settings.graphics === 'low') {
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1));
+    renderer.shadowMap.enabled = false;
+  } else if (settings.graphics === 'high') {
+    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.shadowMap.enabled = true;
+  } else {
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.shadowMap.enabled = true;
+  }
+}
+closeSettings.addEventListener('click', closeSettingsMenu);
+resetSettings.addEventListener('click', () => {
+  settings.fov = UI.FOV;
+  settings.sensitivity = 1.0;
+  settings.crossColor = UI.CROSSHAIR_DOT_COLOR;
+  settings.crossThickness = UI.CROSSHAIR_DOT_THICKNESS;
+  settings.crossOutline = 'round';
+  settings.crossStatic = false;
+  settings.graphics = 'medium';
+  settings.maxFps = 144;
+  applySettings();
+  openSettings();
+});
+window.addEventListener('keydown', (e) => {
+  if (e.code === 'Escape') {
+    if (settingsEl.style.display === 'flex') closeSettingsMenu();
+    else openSettings();
+  }
+});
+
+// Apply initial settings
+applySettings();
+
+// ------------------------------------------------------------------ Key balance (spec §8.4)
+const keyBalanceEl = document.getElementById('keybalance');
+const keyCountEl = document.getElementById('keycount');
+let playerKeys = 0;
+function setKeys(amount) {
+  playerKeys = amount;
+  keyCountEl.textContent = amount;
+  keyBalanceEl.style.display = 'block';
+}
 
 // ------------------------------------------------------------------ Round UI state (spec §1)
 let roundState = 'LOBBY';

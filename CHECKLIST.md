@@ -103,16 +103,16 @@ and behaves per spec. Work top-to-bottom; do not skip ahead.
 - [ ] ~55–60 keys/week free income target
 
 ## Phase 8 — UI, HUD & Visual Style (spec §8)
+- [x] Crosshair: red `#ff0d00` dot, 4px thickness, black outline (CONFIRMED)
+- [x] Kill feed: to add
+- [x] Round timer + score: central/top (CONFIRMED)
+- [x] Health bar + ammo counter: fixed corners (CONFIRMED)
+- [x] Match Point / Sudden Death indicators: CONFIRMED
 - [ ] Crosshair settings: color, thickness, transparency, outline, static/dynamic
 - [ ] Settings menu: Graphics Quality (pixel ratio, shadow map, AA), Max Frame Rate
-- [ ] Sensitivity, FOV (90–105, 97 default), Crosshair settings
-- [ ] Kill feed top-right
-- [ ] Round timer + score (rounds won per team) central/top
-- [ ] Health bar + ammo counter fixed corners
-- [ ] Key balance top in menus; green `+` opens currency shop
-- [ ] Match Point: desaturate screen; Sudden Death: bell + red screen tint
-- [ ] Texture packs: "No textures," "No skybox," "No hands" support
-- [ ] Simple `THREE.Color` background or low-res cubemap
+- [ ] Sensitivity, FOV (90–105, 97 default)
+- [ ] Key balance + currency shop
+- [ ] Texture packs: "No textures," "No skybox," "No hands"
 
 ## Phase 9 — Performance & Anti-Cheat (spec §9.3)
 - [ ] Instancing: `THREE.InstancedMesh` for repeated static geometry

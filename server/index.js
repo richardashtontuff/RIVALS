@@ -307,9 +307,11 @@ function handleFire(ws, payload) {
         target.health = 0;
         target.deaths += 1;
         shooter.kills += 1;
+        const victimId = target.id;
 
         if (currentGameMode === MODE_DUEL) {
           // Round over: shooter wins the round
+          ws.send(JSON.stringify({ type: 'elimination', victimId, attackerId: shooter.id }));
           endRound(shooter.id);
         } else if (currentGameMode === MODE_GUN_GAME) {
           // Cycle to next weapon on kill
