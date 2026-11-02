@@ -235,12 +235,12 @@ function handleFire(ws, payload) {
   const nowMs = now();
   const minInterval = (w.fireCooldown || 0.1) * 1000;
   const jitterTolerance = 50; // ms
-  if (nowMs - pLastFire(p) < minInterval - jitterTolerance) {
+  if (nowMs - pLastFire(shooter) < minInterval - jitterTolerance) {
     // Dropping shot: firing faster than cooldown allows
     ws.send(JSON.stringify({ type: 'hit_rejected', reason: 'fire_rate' }));
     return;
   }
-  setLastFire(p, nowMs);
+  setLastFire(shooter, nowMs);
 
   const clientLatency = Math.max(0, nowMs - (payload.t || nowMs));
   const rewindMs = Math.min(clientLatency, MAX_REWIND_MS);
