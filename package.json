@@ -1,0 +1,25 @@
+{
+  "name": "rivals",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "serve .",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/richardashtontuff/RIVALS.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/richardashtontuff/RIVALS/issues"
+  },
+  "homepage": "https://github.com/richardashtontuff/RIVALS#readme",
+  "dependencies": {
+    "three": "^0.187.0"
+  }
+}
