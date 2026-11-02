@@ -16,6 +16,7 @@ import { CONFIG, STARTER_LOADOUT, DEFAULT_LOADOUT } from './config.js';
 import { MovementController } from './MovementController.js';
 import { validateLoadout, DEFAULT_LOADOUT as LOADOUT_DEFAULT } from './LoadoutSystem.js';
 import { WeaponSystem } from './WeaponSystem.js';
+import { MAP_METADATA, buildProceduralMap, checkLava, checkScanner, shootWindow, isBigMap } from './MapSystem.js';
 
 const W = CONFIG.WEAPONS;
 const M = CONFIG.MOVEMENT;
@@ -152,6 +153,19 @@ dummy.userData = { health: 100, type: 'dummy' };
 world.add(dummy);
 
 const raycaster = new THREE.Raycaster();
+
+// ------------------------------------------------------------------ Map (spec §5)
+let currentMapName = 'Arena';
+let mapMechanics = null;
+
+function loadMap(mapName) {
+  // Clear previous map mechanics objects (keep base world)
+  currentMapName = mapName;
+  const result = buildProceduralMap(mapName, scene, world);
+  mapMechanics = result.mechanics;
+  infoEl.textContent = `Map: ${mapName}` + (isBigMap(mapName) ? ' (BIG)' : '');
+}
+loadMap(currentMapName);
 
 // ------------------------------------------------------------------ Networking (spec §7)
 let socket = null;
@@ -551,6 +565,14 @@ function fireWeapon() {
 
   const eye = new THREE.Vector3().copy(mc.position);
   eye.y += mc.height - M.CAMERA_Y_OFFSET;
+  const fireDir = new THREE.Vector3(0, 0, -1).applyEuler(new THREE.Euler(mc.pitch, mc.yaw, 0, 'YXZ'));
+
+  // Destructible windows (Station, Docks, Westown): shoot to break
+  if (mapMechanics && shootWindow(mapMechanics, eye, fireDir, W[key].range || C.MAX_RANGE)) {
+    showHitmarker();
+    return;
+  }
+
   const result = weaponSystem.fire(key, am, nowMs, camera, input);
 
   showHitmarker();
@@ -596,6 +618,19 @@ function frame(now) {
   while (accumulator >= FIXED_DT) {
     mc.update(FIXED_DT, input, now);
     accumulator -= FIXED_DT;
+  }
+
+  // Onyx lava contact damage (spec §5)
+  if (mapMechanics) {
+    const foot = new THREE.Vector3().copy(mc.position);
+    foot.y = mc.position.y; // character feet
+    const dmg = checkLava(mapMechanics, foot, mc, now);
+    if (dmg !== null) {
+      C.DEFAULT_HEALTH = Math.max(0, C.DEFAULT_HEALTH - dmg);
+      hpEl.textContent = `HP ${C.DEFAULT_HEALTH}`;
+    }
+    // Museum scanner buzzer (spec §5)
+    checkScanner(mapMechanics, mc.position);
   }
 
   weaponSystem.update(FIXED_DT, now);

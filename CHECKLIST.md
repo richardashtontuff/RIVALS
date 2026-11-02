@@ -52,8 +52,9 @@ and behaves per spec. Work top-to-bottom; do not skip ahead.
 - [x] Lag compensation: position-history buffer, rewind to (now - latency)
 - [x] Server tick 20 Hz (50 ms steps); max rewind window 250 ms
 - [x] Round state machine: Lobby → Intermission (map vote) → Round Active → Round End → Match End (first to 5) — CONFIRMED via 2-player test
-- [ ] Server-side speed validation + rubber-band enforcement
-- [ ] Ammo/fire-rate validation (drop shots faster than 1/cooldown)
+- [x] Server-side speed validation + rubber-band enforcement (displacement ≤ MAX_SPEED*dt*1.5)
+- [x] Ammo/fire-rate validation (drop shots faster than 1/cooldown with jitter tolerance)
+  CONFIRMED: 8 rapid AR fires → 1 accepted, 7 rejected (fire_rate)
 
 ## Phase 4 — Movement Tech (spec §3) — verify against success criteria #1-2
 - [ ] Slide-cancel preserves momentum + low hitbox; full slide ends crouched/vulnerable
