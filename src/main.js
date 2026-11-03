@@ -13,11 +13,13 @@
  */
 import * as THREE from '/node_modules/three/build/three.module.js';
 import { CONFIG, STARTER_LOADOUT, DEFAULT_LOADOUT } from './config.js';
-import { mapPreviewPath } from './MapCatalog.js';
+import { MAP_POOL, mapPreviewPath } from './MapCatalog.js';
+import { createPracticeRange } from './PracticeRange.js';
+import { resolveHorizontal } from './WorldCollision.js';
 import { MovementController } from './MovementController.js';
 import { validateLoadout, DEFAULT_LOADOUT as LOADOUT_DEFAULT } from './LoadoutSystem.js';
 import { WeaponSystem } from './WeaponSystem.js';
-import { MAP_METADATA, buildProceduralMap, checkLava, checkScanner, shootWindow, isBigMap } from './MapSystem.js';
+import { MAP_METADATA, buildProceduralMap, checkScanner, shootWindow, isBigMap } from './MapSystem.js';
 
 // ------------------------------------------------------------------ Visible error display
 const errBox = document.createElement('div');
@@ -37,9 +39,6 @@ function showError(msg) {
 window.addEventListener('error', (e) => showError(e.message || e.error || String(e)));
 window.addEventListener('unhandledrejection', (e) => showError(String(e.reason || e)));
 
-// Script running diagnostic - bright green if JS executes
-document.body.style.background = '#00aa00';
-document.body.style.transition = 'none';
 
 // ------------------------------------------------------------------ WebGL diagnostic
 const webglTest = document.createElement('canvas');
@@ -115,8 +114,8 @@ document.body.appendChild(netStatus);
 const roundUI = document.createElement('div');
 roundUI.id = 'roundUI';
 Object.assign(roundUI.style, {
-  position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)',
-  color: '#fff', fontSize: '1.5rem', pointerEvents: 'none', userSelect: 'none',
+  position: 'absolute', top: '16px', left: '50%', transform: 'translateX(-50%)',
+  color: '#fff', fontSize: '1rem', pointerEvents: 'none', userSelect: 'none',
   textShadow: '0 0 10px rgba(0,0,0,0.9)', textAlign: 'center', display: 'none',
 });
 const roundStateEl = document.createElement('div');
@@ -141,7 +140,7 @@ Object.assign(mapVoteUI.style, {
   color: '#fff', fontSize: '1.2rem', pointerEvents: 'auto', userSelect: 'none',
   textShadow: '0 0 10px rgba(0,0,0,0.9)', textAlign: 'center', display: 'none',
   background: 'rgba(0,0,0,0.88)', padding: '1rem', borderRadius: '8px',
-  width: 'min(1000px, 96vw)', maxHeight: '86vh', overflowY: 'auto', zIndex: 20,
+  width: 'min(1000px, 96vw)', maxHeight: '86vh', overflowY: 'auto', zIndex: 40,
 });
 const mapVoteTitle = document.createElement('div');
 mapVoteTitle.style.fontSize = '1.5rem';
@@ -194,6 +193,9 @@ scene.add(dirLight);
 // ------------------------------------------------------------------ World
 const world = new THREE.Group();
 scene.add(world);
+const practiceWorld = createPracticeRange();
+practiceWorld.visible = false;
+scene.add(practiceWorld);
 
 const floorMat = new THREE.MeshStandardMaterial({ color: 0xdddddd, roughness: 0.8 });
 const wallMat = new THREE.MeshStandardMaterial({ color: 0xcccccc, roughness: 0.7 });
@@ -301,16 +303,29 @@ let socket = null;
 let myPlayerId = null;
 let myLatency = 0;
 let playerHealth = C.DEFAULT_HEALTH;
+let inMatch = false;
+let practiceMode = false;
+let queued = false;
+let practiceTargetsHit = 0;
+let serverRoundState = 'LOBBY';
+let connected = false;
 const remotePlayers = new Map(); // id -> {mesh, health}
 
 function connect() {
   socket = new WebSocket(WS_URL);
   socket.onopen = () => {
+    connected = true;
     netStatus.textContent = 'server connected';
+    updateLobby();
     netStatus.style.color = '#44ff44';
     socket.send(JSON.stringify({ type: 'join', clientId: myPlayerId || undefined }));
   };
   socket.onclose = () => {
+    connected = false;
+    queued = false;
+    inMatch = false;
+    if (!practiceMode) roundState = 'LOBBY';
+    updateLobby();
     netStatus.textContent = 'server disconnected (reconnecting)';
     netStatus.style.color = '#ff4444';
     setTimeout(connect, 1500);
@@ -324,7 +339,6 @@ function connect() {
         mc.position.set(msg.spawn[0], msg.spawn[1], msg.spawn[2]);
         mapPool = msg.mapPool || mapPool;
         mapVotes = msg.mapVotes || mapVotes;
-        loadMap(msg.currentMap);
         netStatus.textContent = `server • id ${myPlayerId.slice(0,4)}`;
         netStatus.style.color = '#44ff44';
         break;
@@ -369,15 +383,22 @@ connect();
 
 function onSnapshot(msg) {
   const previousRoundState = roundState;
-  roundState = msg.roundState || roundState;
+  const previouslyInMatch = inMatch;
+  serverRoundState = msg.roundState || 'LOBBY';
+  inMatch = !!msg.inMatch;
+  queued = !!msg.queued;
+  roundState = inMatch ? serverRoundState : 'LOBBY';
+  updateLobby(msg);
   if (roundState === 'INTERMISSION' && previousRoundState !== 'INTERMISSION') {
     hasVoted = false;
     if (document.pointerLockElement) document.exitPointerLock();
   }
-  loadMap(msg.currentMap);
+  if (inMatch && !practiceMode) loadMap(msg.currentMap);
+  if (previouslyInMatch && !inMatch && document.pointerLockElement) document.exitPointerLock();
   roundTimer = msg.roundTimer;
   roundWinnerId = msg.roundWinnerId;
   matchWinScore = msg.matchWinScore || 5;
+  for (const id of Object.keys(scores)) delete scores[id];
   Object.assign(scores, msg.scores || {});
   mapPool = msg.mapPool || mapPool;
   mapVotes = msg.mapVotes || mapVotes;
@@ -398,13 +419,32 @@ function onSnapshot(msg) {
   for (const p of msg.players) {
     incomingIds.add(p.id);
     if (p.id === myPlayerId) {
-      mc.position.set(p.pos[0], p.pos[1], p.pos[2]);
-      mc.yaw = p.yaw || mc.yaw;
-      mc.pitch = p.pitch || mc.pitch;
+      if (!practiceMode && inMatch && roundState === 'ROUND_ACTIVE') {
+        if (previousRoundState !== 'ROUND_ACTIVE' || !previouslyInMatch) {
+          mc.position.set(...p.pos);
+          mc.velocity.set(0, 0, 0);
+          queuedJump = false; queuedDash = false; queuedServerJump = false;
+          cancelReload();
+          for (const key of Object.keys(ammoState)) delete ammoState[key];
+          setSlot(currentSlot);
+          mc.yaw = p.yaw;
+          mc.pitch = 0;
+        } else {
+          const distance = Math.hypot(mc.position.x - p.pos[0], mc.position.z - p.pos[2]);
+          if (distance > 2) {
+            mc.position.x = p.pos[0]; mc.position.z = p.pos[2];
+          } else if (!input.w && !input.a && !input.s && !input.d) {
+            // Smoothly reconcile horizontal drift, without replacing predicted jump height.
+            mc.position.x += (p.pos[0] - mc.position.x) * 0.35;
+            mc.position.z += (p.pos[2] - mc.position.z) * 0.35;
+          }
+        }
+      }
       myAlive = p.alive;
       if (!myAlive) netStatus.textContent = 'eliminated — awaiting next round';
       continue;
     }
+    if (!inMatch || practiceMode) continue;
     let entry = remotePlayers.get(p.id);
     if (!entry) {
       const mesh = new THREE.Mesh(
@@ -438,16 +478,18 @@ function onSnapshot(msg) {
 }
 
 function sendInput() {
-  if (!socket || socket.readyState !== WebSocket.OPEN) return;
+  if (!inMatch || practiceMode || roundState !== 'ROUND_ACTIVE' || !socket || socket.readyState !== WebSocket.OPEN) return;
   socket.send(JSON.stringify({
     type: 'input', t: now(),
     w: input.w, a: input.a, s: input.s, d: input.d,
-    shift: input.shift, crouch: input.crouch, jump: input.jump,
+    shift: input.shift, crouch: input.crouch, jump: input.jump || queuedServerJump,
     yaw: mc.yaw, pitch: mc.pitch,
   }));
+  queuedServerJump = false;
 }
 
 function sendFire(weaponKey, origin, direction, hitTargetId, hitPosition) {
+  if (practiceMode || !inMatch) return;
   if (!socket || socket.readyState !== WebSocket.OPEN) return;
   socket.send(JSON.stringify({
     type: 'fire', t: now(), weaponKey,
@@ -466,6 +508,7 @@ const input = {
   shift: false, crouch: false, jump: false, dash: false,
   reload: false, fire: false, slot: null,
 };
+let queuedJump = false, queuedDash = false, queuedServerJump = false;
 const _onKey = (code, down) => {
   if (code === 'KeyW') input.w = down;
   else if (code === 'KeyA') input.a = down;
@@ -481,24 +524,42 @@ const _onKey = (code, down) => {
   else if (code === 'Digit3' || code === 'Numpad3') input.slot = 3;
   else if (code === 'Digit4' || code === 'Numpad4') input.slot = 4;
 };
-window.addEventListener('keydown', (e) => { _onKey(e.code, true); });
+window.addEventListener('keydown', (e) => {
+  if (document.pointerLockElement !== canvasEl) return;
+  _onKey(e.code, true);
+  // Discrete actions must not be lost when a quick press falls between frames.
+  if (!e.repeat && (practiceMode || (inMatch && roundState === 'ROUND_ACTIVE'))) {
+    if (e.code === 'Space') { queuedJump = true; if (inMatch) queuedServerJump = true; }
+    if (e.code === 'KeyQ') queuedDash = true;
+  }
+  if (!e.repeat && e.code === 'KeyR') startReload();
+  if (!e.repeat && /^(Digit|Numpad)[1-4]$/.test(e.code)) {
+    setSlot(Number(e.code.slice(-1)));
+    input.slot = null;
+  }
+});
 window.addEventListener('keyup', (e) => { _onKey(e.code, false); if (e.code.startsWith('Digit') || e.code.startsWith('Numpad')) input.slot = null; });
 
-window.addEventListener('mousedown', () => { if (document.pointerLockElement === canvasEl) input.fire = true; });
-window.addEventListener('mouseup', () => { input.fire = false; });
+window.addEventListener('mousedown', e => {
+  if (e.button === 0 && document.pointerLockElement === canvasEl) { input.fire = true; fireWeapon(); }
+});
+window.addEventListener('mouseup', e => { if (e.button === 0) input.fire = false; });
 window.addEventListener('mousemove', (e) => {
   if (document.pointerLockElement === canvasEl) {
-    mc.yaw -= e.movementX * 0.002;
-    mc.pitch -= e.movementY * 0.002;
+    mc.setLook(mc.yaw - e.movementX * 0.002 * settings.sensitivity, mc.pitch - e.movementY * 0.002 * settings.sensitivity);
   }
 });
 canvasEl.addEventListener('click', () => {
-  if (!document.pointerLockElement && roundState !== 'INTERMISSION') canvasEl.requestPointerLock();
+  if (!document.pointerLockElement && (practiceMode || (inMatch && roundState === 'ROUND_ACTIVE'))) canvasEl.requestPointerLock();
 });
 document.addEventListener('pointerlockchange', () => {
   const locked = document.pointerLockElement === canvasEl;
-  lockEl.style.display = locked ? 'none' : 'block';
+  lockEl.style.display = !locked && (practiceMode || (inMatch && roundState === 'ROUND_ACTIVE')) ? 'block' : 'none';
   crosshairEl.style.opacity = locked ? '1' : '0';
+  if (!locked) {
+    for (const key of ['w','a','s','d','shift','crouch','jump','dash','reload','fire']) input[key] = false;
+    queuedJump = false; queuedDash = false; queuedServerJump = false;
+  }
 });
 
 // ------------------------------------------------------------------ Movement
@@ -528,12 +589,12 @@ function setSlot(slot) {
   const key = currentWeaponKey();
   const w = W[key];
   // Reload-cancel: switching to Fists cancels active reload (spec §3)
-  if (slot === 3 && key === 'FISTS' && reloading && reloadTimer) {
+  if (slot === 3 && reloading && reloadTimer) {
     cancelReload();
   }
   currentSlot = slot;
   const w2 = currentWeapon();
-  const am = ammoState[currentWeaponKey()];
+  const am = ammoFor(currentWeaponKey());
   if (W[currentWeaponKey()].ammoMag < 0) {
     ammoEl.textContent = '∞';
   } else if (am) {
@@ -549,12 +610,19 @@ function updateSlotsUI() {
     const key = loadout[cat];
     const w = W[key];
     const active = parseInt(num) === currentSlot ? ' <b>[ACTIVE]</b>' : '';
-    return `${num}. ${w.name}${active}`;
-  }).join('  ');
+    return `<span>${num}. ${w.name}${active}</span>`;
+  }).join('');
 }
 setSlot(1);
 
 // ------------------------------------------------------------------ Reload / fire state
+let hitmarkerTimer = null;
+function showHitmarker() {
+  const marker = document.getElementById('hitmarker');
+  marker.style.opacity = '1';
+  clearTimeout(hitmarkerTimer);
+  hitmarkerTimer = setTimeout(() => { marker.style.opacity = '0'; }, C.HITMARKER_DURATION_MS);
+}
 let lastFire = 0;
 let reloading = false;
 let reloadTimer = null;
@@ -570,7 +638,7 @@ function startReload() {
   reloading = true;
   reloadWeaponKey = key;
   if (reloadTimer) clearTimeout(reloadTimer);
-  const refillMs = w.reloadTime * 600;
+  const refillMs = w.reloadTime * 1000;
   reloadTimer = setTimeout(() => {
     const am2 = ammoState[key];
     const need = w.ammoMag - am2.mag;
@@ -602,7 +670,11 @@ const weaponSystem = new WeaponSystem(mc, scene, world, {
       t.userData.health = Math.max(0, t.userData.health - dmg);
       if (t.userData.health <= 0) {
         t.visible = false;
-        setTimeout(() => { t.visible = true; t.userData.health = 100; }, 3000);
+        if (practiceMode && t.userData.type === 'dummy') {
+          practiceTargetsHit += 1;
+          infoEl.textContent = `Targets cleared: ${practiceTargetsHit}`;
+        }
+        setTimeout(() => { t.visible = true; t.userData.health = t.userData.maxHealth || 100; }, 3000);
       }
     }
   },
@@ -694,7 +766,7 @@ function openSettings() {
   setCrossOutline.value = settings.crossOutline;
   setCrossStatic.checked = settings.crossStatic;
   setGraphics.value = settings.graphics;
-  setMaxFps.value = settings.maxFps || 144;
+  setMaxFps.value = String(settings.maxFps);
   setNoTextures.checked = settings.noTextures;
   setNoSkybox.checked = settings.noSkybox;
   setNoHands.checked = settings.noHands;
@@ -703,7 +775,6 @@ function openSettings() {
 }
 function closeSettingsMenu() {
   settingsEl.style.display = 'none';
-  canvasEl.requestPointerLock();
 }
 function applySettings() {
   settings.fov = parseInt(setFov.value, 10);
@@ -747,6 +818,9 @@ function applySettings() {
     renderer.shadowMap.enabled = true;
   }
 }
+for (const control of [setFov, setSens, setCrossColor, setCrossThick, setCrossOutline, setCrossStatic, setGraphics, setMaxFps, setNoTextures, setNoSkybox, setNoHands]) {
+  control.addEventListener('input', applySettings);
+}
 closeSettings.addEventListener('click', closeSettingsMenu);
 resetSettings.addEventListener('click', () => {
   settings.fov = UI.FOV;
@@ -760,17 +834,22 @@ resetSettings.addEventListener('click', () => {
   settings.noTextures = false;
   settings.noSkybox = false;
   settings.noHands = false;
-  applySettings();
   openSettings();
+  applySettings();
 });
 window.addEventListener('keydown', (e) => {
   if (e.code === 'Escape') {
+    if (document.pointerLockElement === canvasEl) { document.exitPointerLock(); return; }
     if (settingsEl.style.display === 'flex') closeSettingsMenu();
     else openSettings();
   }
 });
 
-// Apply initial settings
+// Initialize controls from defaults before reading them.
+setFov.value = settings.fov; setSens.value = settings.sensitivity;
+setCrossColor.value = settings.crossColor; setCrossThick.value = settings.crossThickness;
+setCrossOutline.value = settings.crossOutline; setCrossStatic.checked = settings.crossStatic;
+setGraphics.value = settings.graphics; setMaxFps.value = settings.maxFps;
 applySettings();
 
 // ------------------------------------------------------------------ Key balance (spec §8.4)
@@ -790,14 +869,15 @@ const scores = {};
 let matchWinScore = 5;
 let roundWinnerId = null;
 let myAlive = true;
-let mapPool = [];
+let mapPool = [...MAP_POOL];
 let mapVotes = {};
 let hasVoted = false;
 
 // Only rebuild when vote data changes; rebuilding every frame destroys keyboard focus.
 let lastVoteRender = '';
 function renderMapVote() {
-  const visible = roundState === 'INTERMISSION';
+  const visible = inMatch && !practiceMode && roundState === 'INTERMISSION';
+  mapVoteTitle.textContent = `VOTE FOR A MAP • ${Math.max(0, Math.ceil(roundTimer))}s`;
   mapVoteUI.style.display = visible ? 'block' : 'none';
   if (!visible) { lastVoteRender = ''; return; }
   const signature = JSON.stringify([mapPool, mapVotes, hasVoted]);
@@ -808,6 +888,7 @@ function renderMapVote() {
     const votes = mapVotes[mapName] || 0;
     const btn = document.createElement('button');
     btn.type = 'button';
+    btn.className = 'vote-card';
     btn.setAttribute('aria-label', `${mapName}, ${votes} ${votes === 1 ? 'vote' : 'votes'}`);
     Object.assign(btn.style, {
       width: '150px', padding: '0', overflow: 'hidden', textAlign: 'left',
@@ -835,8 +916,90 @@ function renderMapVote() {
   }
 }
 
+const lobbyEl = document.getElementById('lobby');
+const queueButton = document.getElementById('queueButton');
+const queueStatus = document.getElementById('queueStatus');
+const returnLobby = document.getElementById('returnLobby');
+const mapBrowser = document.getElementById('mapBrowser');
+let lobbyPlayerCount = 0;
+let lobbyQueueCount = 0;
+
+function updateLobby(snapshot) {
+  if (snapshot) {
+    lobbyPlayerCount = snapshot.playerCount ?? lobbyPlayerCount;
+    lobbyQueueCount = snapshot.queueCount ?? lobbyQueueCount;
+  }
+  lobbyEl.style.display = !inMatch && !practiceMode ? 'flex' : 'none';
+  document.getElementById('lobbyConnection').textContent = connected ? 'CONNECTED' : 'CONNECTING';
+  document.getElementById('lobbyPlayers').textContent = `${lobbyPlayerCount} ONLINE`;
+  const matchBusy = serverRoundState !== 'LOBBY' && !inMatch;
+  queueButton.disabled = !connected || matchBusy;
+  queueButton.textContent = !connected ? 'CONNECTING...' : queued ? 'CANCEL SEARCH' : matchBusy ? 'MATCH IN PROGRESS' : 'FIND A MATCH  →';
+  queueStatus.textContent = !connected ? 'Connecting to the game server…' : queued
+    ? `Searching for an opponent • ${lobbyQueueCount}/2 players ready`
+    : matchBusy ? 'A duel is in progress. Join the next match when it ends.'
+    : 'Requires two players. Open a second tab to test, or practice solo.';
+}
+
+queueButton.addEventListener('click', () => {
+  if (!connected || socket.readyState !== WebSocket.OPEN) return;
+  socket.send(JSON.stringify({ type: queued ? 'queue_leave' : 'queue_join' }));
+});
+
+function startPractice() {
+  if (queued && socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'queue_leave' }));
+  queued = false;
+  practiceMode = true;
+  inMatch = false;
+  world.visible = false;
+  practiceWorld.visible = true;
+  weaponSystem.world = practiceWorld;
+  for (const entry of remotePlayers.values()) entry.mesh.visible = false;
+  mc.position.set(0, M.STAND_HEIGHT / 2, 12);
+  mc.velocity.set(0, 0, 0);
+  mc.yaw = 0; mc.pitch = 0;
+  playerHealth = C.DEFAULT_HEALTH;
+  practiceTargetsHit = 0;
+  for (const key of Object.keys(ammoState)) delete ammoState[key];
+  setSlot(1);
+  updateLobby();
+}
+function leaveToLobby() {
+  queuedJump = false; queuedDash = false; queuedServerJump = false;
+  if (socket?.readyState === WebSocket.OPEN && (queued || inMatch)) socket.send(JSON.stringify({ type: 'queue_leave' }));
+  practiceMode = false;
+  inMatch = false;
+  queued = false;
+  roundState = 'LOBBY';
+  world.visible = true;
+  practiceWorld.visible = false;
+  weaponSystem.world = world;
+  if (document.pointerLockElement) document.exitPointerLock();
+  mapBrowser.style.display = 'none';
+  updateLobby();
+}
+document.getElementById('rangeButton').addEventListener('click', startPractice);
+document.getElementById('navRange').addEventListener('click', startPractice);
+document.getElementById('navPlay').addEventListener('click', () => { mapBrowser.style.display = 'none'; });
+document.getElementById('navSettings').addEventListener('click', openSettings);
+returnLobby.addEventListener('click', leaveToLobby);
+document.getElementById('closeMaps').addEventListener('click', () => { mapBrowser.style.display = 'none'; });
+document.getElementById('navMaps').addEventListener('click', () => {
+  const gallery = document.getElementById('mapGallery');
+  if (!gallery.childElementCount) {
+    for (const name of MAP_POOL) {
+      const card = document.createElement('div'); card.className = 'gallery-card';
+      const img = document.createElement('img'); img.src = mapPreviewPath(name); img.alt = ''; img.loading = 'lazy';
+      const title = document.createElement('div'); title.textContent = name;
+      card.append(img, title); gallery.appendChild(card);
+    }
+  }
+  mapBrowser.style.display = 'block';
+});
+updateLobby();
+
 function updateRoundUI() {
-  roundUI.style.display = 'block';
+  roundUI.style.display = inMatch && !practiceMode && roundState !== 'INTERMISSION' ? 'block' : 'none';
   let stateText = roundState;
   if (roundState === 'ROUND_ACTIVE') stateText = 'ROUND ACTIVE';
   else if (roundState === 'INTERMISSION') stateText = 'INTERMISSION';
@@ -873,7 +1036,7 @@ function leaderboard() {
 
 // ------------------------------------------------------------------ Fire
 function fireWeapon() {
-  if (roundState !== 'ROUND_ACTIVE' || !myAlive) return;
+  if (!practiceMode && (!inMatch || roundState !== 'ROUND_ACTIVE' || !myAlive)) return;
   if (weaponSystem.isBlinded(now())) return; // flashbang blocks fire
   const key = currentWeaponKey();
   const w = W[key];
@@ -898,24 +1061,24 @@ function fireWeapon() {
   }
 
   const eye = new THREE.Vector3().copy(mc.position);
-  eye.y += mc.height - M.CAMERA_Y_OFFSET;
+  eye.y += mc.height / 2 - M.CAMERA_Y_OFFSET;
   const fireDir = new THREE.Vector3(0, 0, -1).applyEuler(new THREE.Euler(mc.pitch, mc.yaw, 0, 'YXZ'));
 
   // Destructible windows (Station, Docks, Westown): shoot to break
-  if (mapMechanics && shootWindow(mapMechanics, eye, fireDir, W[key].range || C.MAX_RANGE)) {
+  if (!practiceMode && mapMechanics && shootWindow(mapMechanics, eye, fireDir, W[key].range || C.MAX_RANGE)) {
     showHitmarker();
     return;
   }
 
   const result = weaponSystem.fire(key, am, nowMs, camera, input);
 
-  showHitmarker();
-  if (result.point) {
+  if (result?.hit) showHitmarker();
+  if (result?.point) {
     const dist = eye.distanceTo(result.point);
     let targetPos = null;
     let t = result.targetId ? remotePlayers.get(result.targetId)?.mesh : null;
     if (t) targetPos = t.position;
-    const hs = targetPos ? (result.point.y > targetPos.y + 1.7 * 0.75) : false;
+    const hs = targetPos ? (result.point.y > targetPos.y + 1.7 * 0.25) : false;
     const dmg = weaponSystem._damageAtRange ? weaponSystem._damageAtRange(w, dist, hs) : 0;
     if (hs) infoEl.textContent = 'HEADSHOT';
   }
@@ -931,6 +1094,14 @@ let lastInputSend = 0;
 
 function updateHUD() {
   hpEl.textContent = `HP ${Math.max(0, playerHealth)}`;
+  const playing = practiceMode || (inMatch && roundState === 'ROUND_ACTIVE');
+  document.getElementById('hud').style.display = playing ? 'block' : 'none';
+  slotLabels.style.display = playing ? 'flex' : 'none';
+  infoEl.style.display = playing ? 'block' : 'none';
+  netStatus.style.display = inMatch ? 'block' : 'none';
+  keyBalanceEl.style.display = inMatch ? 'block' : 'none';
+  returnLobby.style.display = (practiceMode || inMatch) ? 'block' : 'none';
+  lockEl.style.display = playing && !document.pointerLockElement ? 'block' : 'none';
   updateSlotsUI();
   renderMapVote();
 
@@ -946,24 +1117,26 @@ function updateHUD() {
 function frame(now) {
   requestAnimationFrame(frame);
 
+  if (settings.maxFps > 0 && now - lastTime + 0.5 < 1000 / settings.maxFps) return;
   const dt = Math.min((now - lastTime) / 1000, 0.1);
   lastTime = now;
   accumulator += dt;
 
   while (accumulator >= FIXED_DT) {
-    mc.update(FIXED_DT, input, now);
+    if (practiceMode || (inMatch && roundState === 'ROUND_ACTIVE')) {
+      const previous = { x: mc.position.x, z: mc.position.z };
+      mc.update(FIXED_DT, { ...input, jump: input.jump || queuedJump, dash: input.dash || queuedDash }, now);
+      queuedJump = false; queuedDash = false;
+      const resolved = resolveHorizontal(previous, mc.position, mc.position.y - mc.height / 2, practiceMode ? [] : undefined, practiceMode ? 21 : 58);
+      if (resolved.x !== mc.position.x) mc.velocity.x = 0;
+      if (resolved.z !== mc.position.z) mc.velocity.z = 0;
+      mc.position.x = resolved.x; mc.position.z = resolved.z;
+    }
     accumulator -= FIXED_DT;
   }
 
   // Onyx lava contact damage (spec §5)
-  if (mapMechanics) {
-    const foot = new THREE.Vector3().copy(mc.position);
-    foot.y = mc.position.y; // character feet
-    const dmg = checkLava(mapMechanics, foot, mc, now);
-    if (dmg !== null) {
-      playerHealth = Math.max(0, playerHealth - dmg);
-      hpEl.textContent = `HP ${playerHealth}`;
-    }
+  if (inMatch && !practiceMode && roundState === 'ROUND_ACTIVE' && mapMechanics) {
     // Museum scanner buzzer (spec §5)
     checkScanner(mapMechanics, mc.position);
   }
@@ -984,7 +1157,7 @@ function frame(now) {
   if (input.reload) startReload();
 
   const eye = new THREE.Vector3().copy(mc.position);
-  eye.y += mc.height - M.CAMERA_Y_OFFSET;
+  eye.y += mc.height / 2 - M.CAMERA_Y_OFFSET;
   camera.position.copy(eye);
   camera.rotation.set(mc.pitch, mc.yaw, 0, 'YXZ');
 

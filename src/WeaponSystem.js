@@ -10,7 +10,7 @@
  * Effects are applied both locally (immediate, spec §7) and validated by the
  * authoritative server.
  */
-import * as THREE from '/node_modules/three/build/three.module.js';
+import * as THREE from 'three';
 import { CONFIG } from './config.js';
 import { MovementController } from './MovementController.js';
 
@@ -20,6 +20,11 @@ const C = CONFIG.COMBAT;
 
 const _dir = new THREE.Vector3();
 const _rayOrigin = new THREE.Vector3();
+
+function visibleInWorld(object) {
+  for (let node = object; node; node = node.parent) if (!node.visible) return false;
+  return true;
+}
 
 /**
  * Create a WeaponSystem bound to a MovementController and the Three.js scene.
@@ -65,7 +70,7 @@ export class WeaponSystem {
 
   /** Apply a flashbang blind to the local player (and remote via server). */
   applyFlashbang(durationMs) {
-    this.flashbangUntil = now + durationMs * 1000;
+    this.flashbangUntil = performance.now() + durationMs * 1000;
   }
 
   /** Is the local player currently blinded? */
@@ -102,10 +107,10 @@ export class WeaponSystem {
     if (!w) return null;
 
     const eye = new THREE.Vector3().copy(this.mc.position);
-    eye.y += this.mc.position.y && this.mc.height - M.CAMERA_Y_OFFSET;
+    eye.y += this.mc.position.y && this.mc.height / 2 - M.CAMERA_Y_OFFSET;
     // eye is the controller position; camera holds pitch/yaw
     eye.copy(this.mc.position);
-    eye.y += this.mc.height - M.CAMERA_Y_OFFSET;
+    eye.y += this.mc.height / 2 - M.CAMERA_Y_OFFSET;
     camera.position.copy(eye);
     camera.rotation.set(this.mc.pitch, this.mc.yaw, 0, 'YXZ');
     camera.updateMatrixWorld();
@@ -150,7 +155,7 @@ export class WeaponSystem {
     // Dash impulse handled by MovementController via input; here we just
     // trigger the melee swing at dash end.
     const eye = new THREE.Vector3().copy(this.mc.position);
-    eye.y += this.mc.height - M.CAMERA_Y_OFFSET;
+    eye.y += this.mc.height / 2 - M.CAMERA_Y_OFFSET;
     const end = eye.clone().add(_dir.multiplyScalar(w.range || 3));
     const hit = this._raycastMelee(eye, end, w.range || 3);
     if (hit) {
@@ -162,10 +167,10 @@ export class WeaponSystem {
   // -------------------------------------------------------------- internals
   _doHitscan(w, origin, dir) {
     const raycaster = new THREE.Raycaster(origin, dir, 0, w.range || C.MAX_RANGE);
-    const hits = raycaster.intersectObjects(this.world.children, true);
+    const hits = raycaster.intersectObjects(this.world.children, true).filter(hit => visibleInWorld(hit.object));
     let target = null, point = null, dmg = 0, headshot = false;
     const remoteHit = this._raycastRemote(origin, dir, w.range || C.MAX_RANGE);
-    if (remoteHit) {
+    if (remoteHit && (!hits.length || origin.distanceTo(remoteHit.point) < hits[0].distance)) {
       target = remoteHit.obj; point = remoteHit.point;
       dmg = this._damageAtRange(w, origin.distanceTo(point), false);
       headshot = remoteHit.headshot;
@@ -180,10 +185,10 @@ export class WeaponSystem {
 
   _doProjectile(w, origin, dir) {
     const raycaster = new THREE.Raycaster(origin, dir, 0, w.range || C.MAX_RANGE);
-    const hits = raycaster.intersectObjects(this.world.children, true);
+    const hits = raycaster.intersectObjects(this.world.children, true).filter(hit => visibleInWorld(hit.object));
     let target = null, point = null, dmg = 0;
     const remoteHit = this._raycastRemote(origin, dir, w.range || C.MAX_RANGE);
-    if (remoteHit) {
+    if (remoteHit && (!hits.length || origin.distanceTo(remoteHit.point) < hits[0].distance)) {
       target = remoteHit.obj; point = remoteHit.point;
       dmg = this._damageAtRange(w, origin.distanceTo(point), false);
     } else if (hits.length) {
@@ -201,10 +206,10 @@ export class WeaponSystem {
 
   _doMelee(w, origin, dir) {
     const raycaster = new THREE.Raycaster(origin, dir, 0, w.range || 3);
-    const hits = raycaster.intersectObjects(this.world.children, true);
+    const hits = raycaster.intersectObjects(this.world.children, true).filter(hit => visibleInWorld(hit.object));
     const remoteHit = this._raycastRemote(origin, dir, w.range || 3);
     let target = null, point = null, dmg = 0;
-    if (remoteHit) {
+    if (remoteHit && (!hits.length || origin.distanceTo(remoteHit.point) < hits[0].distance)) {
       target = remoteHit.obj; point = remoteHit.point; dmg = w.damage;
     } else if (hits.length) {
       point = hits[0].point; target = hits[0].object; dmg = w.damage;
@@ -216,7 +221,7 @@ export class WeaponSystem {
 
   _doUtility(w, origin, dir, now) {
     const raycaster = new THREE.Raycaster(origin, dir, 0, w.range || 40);
-    const hits = raycaster.intersectObjects(this.world.children, true);
+    const hits = raycaster.intersectObjects(this.world.children, true).filter(hit => visibleInWorld(hit.object));
     let target = null, point = null;
     if (hits.length) {
       point = hits[0].point; target = hits[0].object;
@@ -263,7 +268,7 @@ export class WeaponSystem {
     let best = null;
     for (const [id, entry] of (this.cb.getRemotePlayers ? this.cb.getRemotePlayers() : [])) {
       const mesh = entry.mesh;
-      if (!mesh || !mesh.userData || mesh.userData.health <= 0) continue;
+      if (!mesh || !visibleInWorld(mesh) || !mesh.userData || mesh.userData.health <= 0) continue;
       const box = new THREE.Box3().setFromObject(mesh);
       const hit = new THREE.Vector3();
       if (raycasterHitBox(origin, dir, box, hit)) {
@@ -271,7 +276,7 @@ export class WeaponSystem {
         if (d > maxRange) continue;
         if (best === null || d < best.d) {
           // headshot check
-          const headY = mesh.position.y + 1.7 * 0.75;
+          const headY = mesh.position.y + 1.7 * 0.25;
           best = { d, obj: mesh, point: hit.clone(), headshot: hit.y > headY };
         }
       }
@@ -281,7 +286,7 @@ export class WeaponSystem {
 
   _raycastMelee(origin, end, range) {
     const raycaster = new THREE.Raycaster(origin, end.clone().sub(origin).normalize(), 0, range);
-    const hits = raycaster.intersectObjects(this.world.children, true);
+    const hits = raycaster.intersectObjects(this.world.children, true).filter(hit => visibleInWorld(hit.object));
     const remoteHit = this._raycastRemote(origin, end.clone().sub(origin).normalize(), range);
     if (remoteHit) return { obj: remoteHit.obj, point: remoteHit.point };
     if (hits.length) return { obj: hits[0].object, point: hits[0].point };
@@ -339,24 +344,7 @@ export class WeaponSystem {
   }
 }
 
-/** Raycast vs Box3, returns hit point or null. */
+/** Raycast against a player box, including axis-aligned and negative rays. */
 function raycasterHitBox(origin, dir, box, out) {
-  // Simple slab test
-  let tmin = -Infinity, tmax = Infinity;
-  const inv = new THREE.Vector3(1/dir.x, 1/dir.y, 1/dir.z);
-  for (let i = 0; i < 3; i++) {
-    const comp = i === 0 ? origin.x : (i === 1 ? origin.y : origin.z);
-    const d = i === 0 ? dir.x : (i === 1 ? dir.y : dir.z);
-    const min = i === 0 ? box.min.x : (i === 1 ? box.min.y : box.min.z);
-    const max = i === 0 ? box.max.x : (i === 1 ? box.max.y : box.max.z);
-    let t1 = (min - comp) / d;
-    let t2 = (max - comp) / d;
-    if (inv[i] < 0) { const tmp = t1; t1 = t2; t2 = tmp; }
-    tmin = Math.max(tmin, t1);
-    tmax = Math.min(tmax, t2);
-    if (tmax < tmin) return null;
-  }
-  if (tmin < 0) return null;
-  out.set(origin.x + dir.x * tmin, origin.y + dir.y * tmin, origin.z + dir.z * tmin);
-  return box.containsPoint(out);
+  return new THREE.Ray(origin, dir).intersectBox(box, out);
 }

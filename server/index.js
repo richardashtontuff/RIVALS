@@ -19,6 +19,7 @@ import { readFileSync, existsSync } from 'fs';
 import { join, extname } from 'path';
 import { CONFIG } from '../src/config.js';
 import { MAP_POOL } from '../src/MapCatalog.js';
+import { BASE_OBSTACLES, resolveHorizontal } from '../src/WorldCollision.js';
 
 const C = CONFIG.COMBAT;
 const NET = CONFIG.NETWORK;
@@ -112,7 +113,7 @@ function now() { return performance.now(); }
 
 /** Server-side AABB obstacle mirroring client cover/walls for raycast checks. */
 const OBSTACLES = [
-  { name: 'cover', min: [-3, 0, -3], max: [3, 4, 3] },
+  ...BASE_OBSTACLES.map((box, i) => ({ name: i === 0 ? 'cover' : `crate_${i}`, min: [box.minX, 0, box.minZ], max: [box.maxX, box.height, box.maxZ] })),
   { name: 'wall_back', min: [-60, 0, -61], max: [60, 12, -59] },
   { name: 'wall_front', min: [-60, 0, 59], max: [60, 12, 61] },
   { name: 'wall_left', min: [-61, 0, -60], max: [-59, 12, 60] },
@@ -123,6 +124,10 @@ const OBSTACLES = [
 function rayAabb(origin, dir, min, max) {
   let tmin = -Infinity, tmax = Infinity;
   for (let i = 0; i < 3; i++) {
+    if (Math.abs(dir[i]) < 1e-9) {
+      if (origin[i] < min[i] || origin[i] > max[i]) return null;
+      continue;
+    }
     const invD = 1 / dir[i];
     let t1 = (min[i] - origin[i]) * invD;
     let t2 = (max[i] - origin[i]) * invD;
@@ -160,12 +165,25 @@ let roundState = 'LOBBY';
 let roundTimer = INTERMISSION_TIME_S;
 let roundWinnerId = null;
 let currentMap = 'Arena';
+const queuedPlayers = new Set();
+const participants = new Set();
 
 resetVotes();
 
 function ensureScore(id) { if (!scores.has(id)) scores.set(id, 0); }
 function leaderboard() {
   return Array.from(scores.entries()).map(([id, s]) => ({ id, score: s })).sort((a, b) => b.score - a.score);
+}
+
+function returnToLobby() {
+  roundState = 'LOBBY';
+  roundTimer = 0;
+  roundWinnerId = null;
+  participants.clear();
+  queuedPlayers.clear();
+  scores.clear();
+  for (const p of players.values()) p.lastInput = null;
+  resetVotes();
 }
 
 function startIntermission() {
@@ -181,13 +199,21 @@ function startRound() {
   roundTimer = ROUND_TIME_S;
   roundWinnerId = null;
   // Respawn all players
+  let spawnIndex = 0;
   for (const [id, p] of players) {
+    if (!participants.has(id)) continue;
     ensureScore(id);
     p.health = C.DEFAULT_HEALTH;
     p.alive = true;
-    p.pos = [0, 1, 10];
+    p.pos = [0, M.STAND_HEIGHT / 2, spawnIndex++ === 0 ? 35 : -35];
+    p.yaw = p.pos[2] > 0 ? 0 : Math.PI;
+    p.pitch = 0;
+    p.velocityY = 0;
+    p.grounded = true;
+    p.jumpWasDown = false;
+    p.pendingJump = false;
+    p.lastInput = null;
     p.history = [];
-    if (Math.random() < 0.5) p.pos = [0, 1, -10]; // alternate spawn for duel
     p.lastPos = [...p.pos]; // Respawning is not a speed violation.
   }
   console.log(`[server] ROUND ACTIVE — map: ${currentMap}`);
@@ -233,12 +259,12 @@ function endRound(winnerId) {
 const players = new Map();
 
 function createPlayer(id) {
-  ensureScore(id);
   const spawn = players.size === 0 ? [0, 1, 10] : [0, 1, -10];
   return {
     id, pos: [...spawn], vel: [0, 0, 0], yaw: 0, pitch: 0,
     health: C.DEFAULT_HEALTH, maxHealth: C.DEFAULT_HEALTH,
     history: [], lastInput: null, lastSeen: now(), alive: true,
+    velocityY: 0, grounded: true, jumpWasDown: false, pendingJump: false,
     lastPos: [...spawn],        // for speed validation
     lastFireTime: 0,            // for fire-rate validation
     kills: 0, deaths: 0,        // for TDM / FFA scoring
@@ -265,12 +291,13 @@ function rewindPosition(p, rewindMs) {
     if (entry.t <= targetT) best = entry;
     else break;
   }
-  return best.pos;
+  return best ? best.pos : p.pos;
 }
 
 // ----------------------------------------------------------------- Message handling
 function handleJoin(ws, payload) {
-  const id = payload.clientId || Math.random().toString(36).slice(2);
+  if (ws.playerId) return;
+  const id = typeof payload.clientId === 'string' && /^[a-z0-9]{1,32}$/i.test(payload.clientId) ? payload.clientId : Math.random().toString(36).slice(2);
   if (players.has(id)) { ws.send(JSON.stringify({ type: 'error', code: 'id_taken' })); return; }
   const p = createPlayer(id);
   players.set(id, p);
@@ -284,24 +311,26 @@ function handleJoin(ws, payload) {
     level: p.level, elo: p.elo, verified: p.verified,
   }));
   console.log(`[server] player joined: ${id} (${players.size} total)`);
-  // If we have 2 players and in lobby, start intermission shortly
-  if (players.size >= 2 && roundState === 'LOBBY') startIntermission();
+  // Connecting only opens the lobby. Players opt in via queue_join.
 }
 
 function handleInput(ws, payload) {
   const p = players.get(ws.playerId);
-  if (!p) return;
+  if (!p || !participants.has(ws.playerId)) return;
+  if (payload.jump && !p.jumpWasDown) p.pendingJump = true;
+  p.jumpWasDown = !!payload.jump;
   p.lastInput = {
     w: !!payload.w, a: !!payload.a, s: !!payload.s, d: !!payload.d,
     shift: !!payload.shift, crouch: !!payload.crouch, jump: !!payload.jump,
-    yaw: payload.yaw, pitch: payload.pitch, t: payload.t || now(),
+    yaw: Number.isFinite(payload.yaw) ? payload.yaw : 0,
+    pitch: Number.isFinite(payload.pitch) ? Math.max(-Math.PI / 2, Math.min(Math.PI / 2, payload.pitch)) : 0, t: payload.t || now(),
   };
   p.lastSeen = now();
 }
 
 function handleFire(ws, payload) {
   const shooter = players.get(ws.playerId);
-  if (!shooter || !shooter.alive) return;
+  if (!shooter || !shooter.alive || !participants.has(shooter.id)) return;
   if (roundState !== 'ROUND_ACTIVE') return;
 
   const weaponKey = payload.weaponKey || 'ASSAULT_RIFLE';
@@ -324,7 +353,8 @@ function handleFire(ws, payload) {
 
   const hitTargetId = payload.hitTargetId;
   const hitPosition = payload.hitPosition;
-  const origin = payload.origin;
+  if (!Array.isArray(hitPosition) || hitPosition.length !== 3 || !hitPosition.every(Number.isFinite)) return;
+  if (hitTargetId && (!participants.has(hitTargetId) || hitTargetId === shooter.id)) return;
 
   // Lag compensation: rewind target
   let targetPos = null;
@@ -355,7 +385,7 @@ function handleFire(ws, payload) {
 
   // Apply authoritative damage (falloff + headshot)
   const distMeters = dist3(shooterPos, hitPosition);
-  const headshot = hitTargetId ? (hitPosition[1] > players.get(hitTargetId).pos[1] + 1.7 * 0.75) : false;
+  const headshot = hitTargetId ? (hitPosition[1] > players.get(hitTargetId).pos[1] + 1.7 * 0.25) : false;
   const body = w.noFalloff ? w.damage.start : (() => {
     const range = w.range || 100;
     const t = Math.min(1, distMeters / range);
@@ -428,11 +458,12 @@ function simulate() {
     roundTimer -= dt;
     // Apply player movement
     for (const p of players.values()) {
-      if (!p.alive || !p.lastInput) continue;
+      if (!participants.has(p.id) || !p.alive) continue;
+      if (!p.lastInput) { p.velocityY = 0; continue; }
       const input = p.lastInput;
-      const speed = input.shift ? M.SPRINT_SPEED : M.WALK_SPEED;
+      const speed = (M.AUTO_SPRINT || input.shift) ? M.SPRINT_SPEED : M.WALK_SPEED;
       const move = [0, 0, 0];
-      const fwd = [Math.sin(input.yaw), 0, -Math.cos(input.yaw)];
+      const fwd = [-Math.sin(input.yaw), 0, -Math.cos(input.yaw)];
       const right = [Math.cos(input.yaw), 0, Math.sin(input.yaw)];
       if (input.w) { move[0]+=fwd[0]; move[1]+=fwd[1]; move[2]+=fwd[2]; }
       if (input.s) { move[0]-=fwd[0]; move[1]-=fwd[1]; move[2]-=fwd[2]; }
@@ -443,11 +474,25 @@ function simulate() {
         move[0]/=mLen; move[1]/=mLen; move[2]/=mLen;
         p.pos[0]+=move[0]*speed*dt; p.pos[1]+=move[1]*speed*dt; p.pos[2]+=move[2]*speed*dt;
       }
+      if (p.pendingJump && p.grounded) {
+        p.velocityY = M.JUMP_FORCE;
+        p.grounded = false;
+      }
+      p.pendingJump = false;
+      p.velocityY -= M.GRAVITY * dt;
+      p.pos[1] += p.velocityY * dt;
+      if (p.pos[1] <= M.STAND_HEIGHT / 2) {
+        p.pos[1] = M.STAND_HEIGHT / 2;
+        p.velocityY = 0;
+        p.grounded = true;
+      }
+      const resolved = resolveHorizontal({ x: p.lastPos[0], z: p.lastPos[2] }, { x: p.pos[0], z: p.pos[2] }, p.pos[1] - M.STAND_HEIGHT / 2);
+      p.pos[0] = resolved.x; p.pos[2] = resolved.z;
       p.yaw = input.yaw; p.pitch = input.pitch;
 
       // --- Server-side speed validation (spec §9.3) ---
       const maxAllowed = M.SPRINT_SPEED * dt * NET.SERVER_MOVE_TOLERANCE;
-      const disp = dist3(p.pos, p.lastPos);
+      const disp = Math.hypot(p.pos[0] - p.lastPos[0], p.pos[2] - p.lastPos[2]);
       if (disp > maxAllowed) {
         // Rubber-band back to last known good position
         p.pos[0] = p.lastPos[0]; p.pos[1] = p.lastPos[1]; p.pos[2] = p.lastPos[2];
@@ -477,14 +522,14 @@ function simulate() {
     }
   } else if (roundState === 'ROUND_MATCH_END') {
     roundTimer -= dt;
-    if (roundTimer <= 0) startIntermission(); // rematch
+    if (roundTimer <= 0) returnToLobby();
   } else if (roundState === 'LOBBY') {
     // waiting for players
   }
 }
 
 function recordAllHistory() {
-  for (const p of players.values()) recordHistory(p);
+  for (const p of players.values()) if (participants.has(p.id)) recordHistory(p);
 }
 
 // ----------------------------------------------------------------- Snapshot broadcast
@@ -494,18 +539,21 @@ function broadcastSnapshot() {
     scores: Object.fromEntries(scores), roundWinnerId,
     matchWinScore: MATCH_WIN_SCORE, currentMap, gameMode: currentGameMode,
     mapPool: MAP_POOL, mapVotes: Object.fromEntries(mapVotes),
+    queueCount: queuedPlayers.size, playerCount: players.size,
     players: [],
   };
   for (const p of players.values()) {
+    if (!participants.has(p.id)) continue;
     snapshot.players.push({
       id: p.id, pos: p.pos, yaw: p.yaw, pitch: p.pitch,
       health: p.health, alive: p.alive, kills: p.kills, deaths: p.deaths,
       keys: p.keys, level: p.level, elo: p.elo, verified: p.verified,
     });
   }
-  const msg = JSON.stringify(snapshot);
   for (const client of wss.clients) {
-    if (client.readyState === WebSocket.OPEN) client.send(msg);
+    if (client.readyState === WebSocket.OPEN) client.send(JSON.stringify({
+      ...snapshot, inMatch: participants.has(client.playerId), queued: queuedPlayers.has(client.playerId),
+    }));
   }
 }
 
@@ -553,6 +601,20 @@ wss.on('connection', (ws) => {
       const msg = JSON.parse(raw.toString());
       switch (msg.type) {
         case 'join': handleJoin(ws, msg); break;
+        case 'queue_join':
+          if (ws.playerId && players.has(ws.playerId) && roundState === 'LOBBY') {
+            queuedPlayers.add(ws.playerId);
+            if (queuedPlayers.size >= 2) {
+              for (const id of queuedPlayers) participants.add(id);
+              queuedPlayers.clear();
+              startIntermission();
+            }
+          }
+          break;
+        case 'queue_leave':
+          queuedPlayers.delete(ws.playerId);
+          if (participants.has(ws.playerId)) returnToLobby();
+          break;
         case 'input': handleInput(ws, msg); break;
         case 'fire': handleFire(ws, msg); break;
         case 'set_mode': currentGameMode = msg.mode || MODE_DUEL; console.log('[server] game mode set to', currentGameMode); break;
@@ -569,7 +631,7 @@ wss.on('connection', (ws) => {
           }
           break;
         case 'vote_map':
-          if (roundState === 'INTERMISSION' && ws.playerId && players.has(ws.playerId) && MAP_POOL.includes(msg.map)) {
+          if (roundState === 'INTERMISSION' && ws.playerId && participants.has(ws.playerId) && MAP_POOL.includes(msg.map)) {
             if (!votingPlayers.has(ws.playerId)) {
               votingPlayers.add(ws.playerId);
               const current = mapVotes.get(msg.map) || 0;
@@ -584,13 +646,12 @@ wss.on('connection', (ws) => {
   });
   ws.on('close', () => {
     if (ws.playerId) {
+      const wasParticipant = participants.has(ws.playerId);
+      queuedPlayers.delete(ws.playerId);
       players.delete(ws.playerId);
       scores.delete(ws.playerId);
       console.log(`[server] player left: ${ws.playerId} (${players.size} total)`);
-      if (players.size < 2 && roundState !== 'LOBBY') {
-        roundState = 'LOBBY';
-        console.log('[server] not enough players, back to LOBBY');
-      }
+      if (wasParticipant) returnToLobby();
     }
   });
   ws.on('error', (e) => console.error('[server] ws error:', e.message));
