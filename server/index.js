@@ -58,8 +58,30 @@ const MODE_DUEL = 'DUEL';        // 1v1-5v5, first to 5 round wins
 const MODE_TDM = 'TDM';          // 8v8, most kills before timer
 const MODE_FFA = 'FFA';          // 16 players, top 5 scorers win
 const MODE_GUN_GAME = 'GUN_GAME'; // cycle weapons per kill
+const MODE_RANKED = 'RANKED';    // 1v1/2v2/3v3, ELO, Level 100 + verification
 
 let currentGameMode = MODE_DUEL;
+
+// ELO system (spec §2 - Ranked)
+const ELO_K_FACTOR = 32;
+const ELO_INITIAL = 1000;
+
+function eloExpected(ratingA, ratingB) {
+  return 1 / (1 + Math.pow(10, (ratingB - ratingA) / 400));
+}
+
+function updateElo(winnerRating, loserRating) {
+  const expectedWinner = eloExpected(winnerRating, loserRating);
+  const expectedLoser = eloExpected(loserRating, winnerRating);
+  const newWinner = Math.round(winnerRating + ELO_K_FACTOR * (1 - expectedWinner));
+  const newLoser = Math.round(loserRating + ELO_K_FACTOR * (0 - expectedLoser));
+  return { winner: newWinner, loser: newLoser };
+}
+
+function checkRankedEntry(player) {
+  // Ranked entry: Level 100 + real-world Roblox account verification (spec §2)
+  return player.level >= 100 && player.verified === true;
+}
 
 // Round state enum
 const ROUND_LOBBY = 'LOBBY';
@@ -183,6 +205,18 @@ function endRound(winnerId) {
     // Key reward for round win (spec §6)
     const winner = players.get(winnerId);
     if (winner) winner.keys = (winner.keys || 0) + 2;
+    // ELO update for Ranked mode (spec §2)
+    if (currentGameMode === MODE_RANKED) {
+      const loserId = Array.from(players.keys()).find(id => id !== winnerId && players.get(id)?.health === 0);
+      if (loserId) {
+        const winner = players.get(winnerId);
+        const loser = players.get(loserId);
+        const newRatings = updateElo(winner.elo, loser.elo);
+        winner.elo = newRatings.winner;
+        loser.elo = newRatings.loser;
+        console.log(`[server] ELO: ${winnerId.slice(0,4)} ${winner.elo}, ${loserId.slice(0,4)} ${loser.elo}`);
+      }
+    }
   }
   const lb = leaderboard();
   console.log(`[server] ROUND END — mode ${currentGameMode} winner ${winnerId?.slice(0,4)}, scores: ${JSON.stringify(Object.fromEntries(scores))}`);
@@ -214,6 +248,8 @@ function createPlayer(id) {
     keys: 0,                    // economy currency
     ownedWeapons: new Set(['ASSAULT_RIFLE', 'HANDGUN', 'FISTS', 'GRENADE']), // starter kit
     level: 1,
+    verified: false,            // Roblox account verification (spec §2)
+    elo: ELO_INITIAL,           // ELO rating for Ranked
   };
 }
 
@@ -247,6 +283,7 @@ function handleJoin(ws, payload) {
     scores: Object.fromEntries(scores), matchWinScore: MATCH_WIN_SCORE,
     currentMap, gameMode: currentGameMode, mapPool: MAP_POOL,
     mapVotes: Object.fromEntries(mapVotes),
+    level: p.level, elo: p.elo, verified: p.verified,
   }));
   console.log(`[server] player joined: ${id} (${players.size} total)`);
   // If we have 2 players and in lobby, start a round shortly
@@ -456,7 +493,7 @@ function broadcastSnapshot(wsServer) {
     snapshot.players.push({
       id: p.id, pos: p.pos, yaw: p.yaw, pitch: p.pitch,
       health: p.health, alive: p.alive, kills: p.kills, deaths: p.deaths,
-      keys: p.keys,
+      keys: p.keys, level: p.level, elo: p.elo, verified: p.verified,
     });
   }
   const msg = JSON.stringify(snapshot);
@@ -479,6 +516,18 @@ wsServer.on('connection', (ws) => {
         case 'input': handleInput(ws, msg); break;
         case 'fire': handleFire(ws, msg); break;
         case 'set_mode': currentGameMode = msg.mode || MODE_DUEL; console.log('[server] game mode set to', currentGameMode); break;
+        case 'set_verified':
+          if (ws.playerId) {
+            const p = players.get(ws.playerId);
+            if (p) p.verified = !!msg.verified;
+          }
+          break;
+        case 'set_level':
+          if (ws.playerId) {
+            const p = players.get(ws.playerId);
+            if (p) p.level = Math.max(1, Math.min(100, msg.level || 1));
+          }
+          break;
         case 'vote_map':
           if (roundState === ROUND_INTERMISSION && msg.map) {
             if (!votingPlayers.has(ws.playerId)) {

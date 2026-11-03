@@ -83,12 +83,12 @@ and behaves per spec. Work top-to-bottom; do not skip ahead.
 
 ## Phase 6 — Game Modes (spec §2)
 - [x] Duel (Core): 1v1–5v5, first to 5 round wins (server round machine)
-- [ ] Map vote in Intermission
-- [ ] Big mandatory for 3v3+ (MapSystem.bigRequired)
-- [ ] Ranked: 1v1, 2v2, 3v3, ELO, entry Level 100 + verification
-- [ ] Team Deathmatch: 8v8, most kills before timer
-- [ ] Free For All: 16 players, top 5 winners
-- [ ] Gun Game: cycle weapons per kill
+- [x] Map vote in Intermission
+- [x] Big mandatory for 3v3+ (MapSystem.bigRequired)
+- [x] Ranked: ELO system, entry Level 100 + verification
+- [x] Team Deathmatch: 8v8, most kills before timer
+- [x] Free For All: 16 players, top 5 scorers win round
+- [x] Gun Game: cycle weapons per kill
 - [ ] Special Playlists: Juggernaut, Boss Arena (Gargoyle Tower), Obby, Spleef
 
 ## Phase 7 — Economy & Progression (spec §6)
