@@ -11,12 +11,42 @@
  *   Katana deflection, Scythe dash-melee, Spear throw, Exogun AOE,
  *   Permafrost slow/freeze, Energy Rifle wall bounces, utility effects.
  */
-import * as THREE from 'three';
+import * as THREE from '/node_modules/three/build/three.module.js';
 import { CONFIG, STARTER_LOADOUT, DEFAULT_LOADOUT } from './config.js';
 import { MovementController } from './MovementController.js';
 import { validateLoadout, DEFAULT_LOADOUT as LOADOUT_DEFAULT } from './LoadoutSystem.js';
 import { WeaponSystem } from './WeaponSystem.js';
 import { MAP_METADATA, buildProceduralMap, checkLava, checkScanner, shootWindow, isBigMap } from './MapSystem.js';
+
+// ------------------------------------------------------------------ Visible error display
+const errBox = document.createElement('div');
+errBox.id = 'jsError';
+Object.assign(errBox.style, {
+  position: 'fixed', top: '10px', left: '10px', right: '10px',
+  color: '#fff', background: 'rgba(200, 0, 0, 0.9)', padding: '12px',
+  fontFamily: 'monospace', fontSize: '13px', zIndex: 9999, display: 'none',
+  borderRadius: '4px', lineHeight: '1.4',
+});
+document.body.appendChild(errBox);
+function showError(msg) {
+  errBox.style.display = 'block';
+  errBox.textContent = 'ERROR: ' + msg;
+  console.error(msg);
+}
+window.addEventListener('error', (e) => showError(e.message || e.error || String(e)));
+window.addEventListener('unhandledrejection', (e) => showError(String(e.reason || e)));
+
+// Script running diagnostic - bright green if JS executes
+document.body.style.background = '#00aa00';
+document.body.style.transition = 'none';
+
+// ------------------------------------------------------------------ WebGL diagnostic
+const webglTest = document.createElement('canvas');
+const gl = webglTest.getContext('webgl') || webglTest.getContext('experimental-webgl');
+if (!gl) {
+  showError('WebGL not supported in this browser');
+}
+console.log('WebGL supported:', !!gl);
 
 const W = CONFIG.WEAPONS;
 const M = CONFIG.MOVEMENT;
@@ -35,10 +65,20 @@ if (!starterCheck.valid) {
 // ------------------------------------------------------------------ DOM
 const canvasEl = document.getElementById('canvas');
 const crosshairEl = document.getElementById('crosshair');
-const crosshairDot = crosshairEl.querySelector('.dot');
+const crosshairDot = crosshairEl?.querySelector('.dot');
 const lockEl = document.getElementById('lock');
 const ammoEl = document.getElementById('ammo');
 const hpEl = document.getElementById('hp');
+
+const missingEls = [];
+if (!canvasEl) missingEls.push('#canvas');
+if (!crosshairEl) missingEls.push('#crosshair');
+if (!lockEl) missingEls.push('#lock');
+if (!ammoEl) missingEls.push('#ammo');
+if (!hpEl) missingEls.push('#hp');
+if (missingEls.length > 0) {
+  showError('Missing DOM elements: ' + missingEls.join(', '));
+}
 
 const infoEl = document.createElement('div');
 infoEl.id = 'info';
@@ -129,10 +169,17 @@ scene.fog = new THREE.Fog(0xe8e8e8, 40, 110);
 
 const camera = new THREE.PerspectiveCamera(UI.FOV, window.innerWidth / window.innerHeight, 0.1, 1000);
 
-const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-renderer.setSize(window.innerWidth, window.innerHeight);
-canvasEl.appendChild(renderer.domElement);
+let renderer = null;
+try {
+  renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  canvasEl.appendChild(renderer.domElement);
+  console.log('Three.js renderer created, canvas appended');
+} catch (e) {
+  showError('Three.js renderer failed: ' + e.message);
+  renderer = null;
+}
 
 scene.add(new THREE.AmbientLight(0xffffff, 0.5));
 const dirLight = new THREE.DirectionalLight(0xffffff, 0.9);
@@ -899,14 +946,21 @@ function frame(now) {
   camera.position.copy(eye);
   camera.rotation.set(mc.pitch, mc.yaw, 0, 'YXZ');
 
-  renderer.render(scene, camera);
+  if (renderer) {
+    renderer.render(scene, camera);
+  }
   updateHUD();
 }
 
 window.addEventListener('resize', () => {
+  if (!renderer) return;
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
-requestAnimationFrame(frame);
+if (renderer) {
+  requestAnimationFrame(frame);
+} else {
+  showError('Three.js renderer not available — WebGL may not be supported');
+}

@@ -15,7 +15,7 @@
  * is used when no asset exists (assets must pass through the gltf-transform
  * Draco + WebP pipeline per spec §10).
  */
-import * as THREE from 'three';
+import * as THREE from '/node_modules/three/build/three.module.js';
 import { CONFIG } from './config.js';
 
 const M = CONFIG.MAPS;

@@ -10,7 +10,7 @@
  * Effects are applied both locally (immediate, spec §7) and validated by the
  * authoritative server.
  */
-import * as THREE from 'three';
+import * as THREE from '/node_modules/three/build/three.module.js';
 import { CONFIG } from './config.js';
 import { MovementController } from './MovementController.js';
 
