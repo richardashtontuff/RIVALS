@@ -51,3 +51,6 @@
 #hitmarker {position:absolute;left:50%;top:50%;transform:translate(-50%,-53%);font-size:31px;font-weight:300;color:white;opacity:0;text-shadow:0 1px 4px #000;}
 .vote-card:hover:not(:disabled), .vote-card:focus-visible {outline:2px solid #f3b44b;outline-offset:2px;}
 .vote-card:disabled {opacity:.72;}
+
+.gallery-card .explore-map {display:block;width:calc(100% - 24px);margin:0 12px 12px;padding:9px;background:#293747;border:1px solid #506176;color:#fff;font-size:10px;font-weight:800;letter-spacing:.08em;cursor:pointer;}
+.gallery-card .explore-map:hover,.gallery-card .explore-map:focus-visible {border-color:#f3b44b;background:#35475b;}

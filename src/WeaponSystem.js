@@ -22,7 +22,7 @@ const _dir = new THREE.Vector3();
 const _rayOrigin = new THREE.Vector3();
 
 function visibleInWorld(object) {
-  for (let node = object; node; node = node.parent) if (!node.visible) return false;
+  for (let node = object; node; node = node.parent) if (!node.visible || node.userData.isDecoration) return false;
   return true;
 }
 

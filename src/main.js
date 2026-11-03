@@ -15,11 +15,12 @@ import * as THREE from '/node_modules/three/build/three.module.js';
 import { CONFIG, STARTER_LOADOUT, DEFAULT_LOADOUT } from './config.js';
 import { MAP_POOL, mapPreviewPath } from './MapCatalog.js';
 import { createPracticeRange } from './PracticeRange.js';
-import { resolveHorizontal } from './WorldCollision.js';
+import { resolveHorizontal, supportHeight } from './WorldCollision.js';
+import { getMapLayout, getMapObstacles } from './MapLayouts.js';
 import { MovementController } from './MovementController.js';
 import { validateLoadout, DEFAULT_LOADOUT as LOADOUT_DEFAULT } from './LoadoutSystem.js';
 import { WeaponSystem } from './WeaponSystem.js';
-import { MAP_METADATA, buildProceduralMap, checkScanner, shootWindow, isBigMap } from './MapSystem.js';
+import { MAP_METADATA, buildProceduralMap, buildAuthoredMap, checkScanner, shootWindow, isBigMap } from './MapSystem.js';
 
 // ------------------------------------------------------------------ Visible error display
 const errBox = document.createElement('div');
@@ -197,19 +198,21 @@ const practiceWorld = createPracticeRange();
 practiceWorld.visible = false;
 scene.add(practiceWorld);
 
+const legacyWorld = new THREE.Group();
+world.add(legacyWorld);
 const floorMat = new THREE.MeshStandardMaterial({ color: 0xdddddd, roughness: 0.8 });
 const wallMat = new THREE.MeshStandardMaterial({ color: 0xcccccc, roughness: 0.7 });
 
 const floor = new THREE.Mesh(new THREE.PlaneGeometry(120, 120), floorMat);
 floor.rotation.x = -Math.PI / 2;
 floor.name = 'floor';
-world.add(floor);
+legacyWorld.add(floor);
 
 function addWall(x, y, z, w, h, d) {
   const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), wallMat);
   m.position.set(x, y, z);
   m.name = 'wall';
-  world.add(m);
+  legacyWorld.add(m);
   return m;
 }
 addWall(0, 6, -60, 120, 12, 2);
@@ -220,13 +223,13 @@ addWall(60, 6, 0, 2, 12, 120);
 const cover = new THREE.Mesh(new THREE.BoxGeometry(6, 4, 6), wallMat);
 cover.position.set(0, 2, 0);
 cover.name = 'cover';
-world.add(cover);
+legacyWorld.add(cover);
 
 const dummy = new THREE.Mesh(new THREE.BoxGeometry(1, 2, 1), new THREE.MeshStandardMaterial({ color: 0xff4444 }));
 dummy.position.set(18, 1, 22);
 dummy.name = 'dummy';
 dummy.userData = { health: 100, type: 'dummy' };
-world.add(dummy);
+legacyWorld.add(dummy);
 
 const raycaster = new THREE.Raycaster();
 
@@ -246,7 +249,7 @@ function buildInstancedCrates(count, spacing) {
   }
   instanced.name = 'instanced_crates';
   instanced.count = count;
-  world.add(instanced);
+  legacyWorld.add(instanced);
   return instanced;
 }
 
@@ -262,7 +265,7 @@ function buildLODModel() {
   lod.addLevel(new THREE.Mesh(lowGeo, mat), 50);
   lod.name = 'lod_model';
   lod.position.set(25, 2, 25);
-  world.add(lod);
+  legacyWorld.add(lod);
   return lod;
 }
 
@@ -292,7 +295,11 @@ function loadMap(mapName) {
   mapGroup = new THREE.Group();
   world.add(mapGroup);
   currentMapName = mapName;
-  const result = buildProceduralMap(mapName, scene, mapGroup);
+  const layout = getMapLayout(mapName);
+  legacyWorld.visible = !layout;
+  const result = layout ? buildAuthoredMap(layout, mapGroup) : buildProceduralMap(mapName, scene, mapGroup);
+  scene.background = new THREE.Color(layout?.sky ?? 0xe8e8e8);
+  scene.fog = new THREE.Fog(layout?.sky ?? 0xe8e8e8, layout ? layout.fog * .55 : 40, layout?.fog ?? 110);
   mapMechanics = result.mechanics;
   infoEl.textContent = `Map: ${mapName}` + (isBigMap(mapName) ? ' (BIG)' : '');
 }
@@ -305,6 +312,7 @@ let myLatency = 0;
 let playerHealth = C.DEFAULT_HEALTH;
 let inMatch = false;
 let practiceMode = false;
+let exploreMode = false;
 let queued = false;
 let practiceTargetsHit = 0;
 let serverRoundState = 'LOBBY';
@@ -393,7 +401,10 @@ function onSnapshot(msg) {
     hasVoted = false;
     if (document.pointerLockElement) document.exitPointerLock();
   }
-  if (inMatch && !practiceMode) loadMap(msg.currentMap);
+  if (inMatch && !practiceMode) {
+    loadMap(msg.currentMap);
+    if (settings.noSkybox) scene.background = null;
+  }
   if (previouslyInMatch && !inMatch && document.pointerLockElement) document.exitPointerLock();
   roundTimer = msg.roundTimer;
   roundWinnerId = msg.roundWinnerId;
@@ -794,7 +805,7 @@ function applySettings() {
   if (settings.noSkybox) {
     scene.background = null; // remove skybox/background
   } else {
-    scene.background = new THREE.Color(0xe8e8e8);
+    scene.background = new THREE.Color(((!practiceMode || exploreMode) && getMapLayout(currentMapName)?.sky) ?? 0xe8e8e8);
   }
   camera.updateProjectionMatrix();
   // Apply crosshair
@@ -950,6 +961,9 @@ function startPractice() {
   if (queued && socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'queue_leave' }));
   queued = false;
   practiceMode = true;
+  exploreMode = false;
+  scene.background = settings.noSkybox ? null : new THREE.Color(0xe8e8e8);
+  scene.fog = new THREE.Fog(0xe8e8e8, 40, 110);
   inMatch = false;
   world.visible = false;
   practiceWorld.visible = true;
@@ -960,20 +974,41 @@ function startPractice() {
   mc.yaw = 0; mc.pitch = 0;
   playerHealth = C.DEFAULT_HEALTH;
   practiceTargetsHit = 0;
+  infoEl.textContent = 'Targets cleared: 0';
   for (const key of Object.keys(ammoState)) delete ammoState[key];
   setSlot(1);
   updateLobby();
+}
+function exploreMap(name) {
+  if (queued && socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'queue_leave' }));
+  queued = false; practiceMode = true; exploreMode = true; inMatch = false;
+  loadMap(name);
+  const layout = getMapLayout(name);
+  scene.background = settings.noSkybox ? null : new THREE.Color(layout?.sky ?? 0xe8e8e8);
+  scene.fog = new THREE.Fog(layout?.sky ?? 0xe8e8e8, layout ? layout.fog * .55 : 40, layout?.fog ?? 110);
+  world.visible = true; practiceWorld.visible = false; weaponSystem.world = world;
+  for (const entry of remotePlayers.values()) entry.mesh.visible = false;
+  mc.position.set(0, M.STAND_HEIGHT / 2, 35); mc.velocity.set(0, 0, 0);
+  mc.yaw = 0; mc.pitch = 0; playerHealth = C.DEFAULT_HEALTH;
+  cancelReload(); for (const key of Object.keys(ammoState)) delete ammoState[key];
+  setSlot(1);
+  infoEl.textContent = `Exploring: ${name}`;
+  mapBrowser.style.display = 'none'; updateLobby();
 }
 function leaveToLobby() {
   queuedJump = false; queuedDash = false; queuedServerJump = false;
   if (socket?.readyState === WebSocket.OPEN && (queued || inMatch)) socket.send(JSON.stringify({ type: 'queue_leave' }));
   practiceMode = false;
+  exploreMode = false;
   inMatch = false;
   queued = false;
   roundState = 'LOBBY';
   world.visible = true;
   practiceWorld.visible = false;
   weaponSystem.world = world;
+  const layout = getMapLayout(currentMapName);
+  scene.background = settings.noSkybox ? null : new THREE.Color(layout?.sky ?? 0xe8e8e8);
+  scene.fog = new THREE.Fog(layout?.sky ?? 0xe8e8e8, layout ? layout.fog * .55 : 40, layout?.fog ?? 110);
   if (document.pointerLockElement) document.exitPointerLock();
   mapBrowser.style.display = 'none';
   updateLobby();
@@ -991,7 +1026,11 @@ document.getElementById('navMaps').addEventListener('click', () => {
       const card = document.createElement('div'); card.className = 'gallery-card';
       const img = document.createElement('img'); img.src = mapPreviewPath(name); img.alt = ''; img.loading = 'lazy';
       const title = document.createElement('div'); title.textContent = name;
-      card.append(img, title); gallery.appendChild(card);
+      const explore = document.createElement('button');
+      explore.type = 'button'; explore.className = 'explore-map'; explore.textContent = 'EXPLORE SOLO';
+      explore.setAttribute('aria-label', `Explore ${name} solo`);
+      explore.addEventListener('click', () => exploreMap(name));
+      card.append(img, title, explore); gallery.appendChild(card);
     }
   }
   mapBrowser.style.display = 'block';
@@ -1125,12 +1164,20 @@ function frame(now) {
   while (accumulator >= FIXED_DT) {
     if (practiceMode || (inMatch && roundState === 'ROUND_ACTIVE')) {
       const previous = { x: mc.position.x, z: mc.position.z };
+      const previousFoot = mc.position.y - mc.height / 2;
       mc.update(FIXED_DT, { ...input, jump: input.jump || queuedJump, dash: input.dash || queuedDash }, now);
       queuedJump = false; queuedDash = false;
-      const resolved = resolveHorizontal(previous, mc.position, mc.position.y - mc.height / 2, practiceMode ? [] : undefined, practiceMode ? 21 : 58);
+      const obstacles = practiceMode && !exploreMode ? [] : getMapObstacles(currentMapName);
+      const resolved = resolveHorizontal(previous, mc.position, mc.position.y - mc.height / 2, obstacles || undefined, (practiceMode && !exploreMode) ? 21 : 58, .4, obstacles ? .4 : 0);
       if (resolved.x !== mc.position.x) mc.velocity.x = 0;
       if (resolved.z !== mc.position.z) mc.velocity.z = 0;
       mc.position.x = resolved.x; mc.position.z = resolved.z;
+      if (obstacles) {
+        const ground = supportHeight(resolved.x, resolved.z, previousFoot, obstacles);
+        if (mc.velocity.y <= 0 && mc.position.y - mc.height / 2 <= ground) {
+          mc.position.y = ground + mc.height / 2; mc.velocity.y = 0; mc.onGround = true;
+        }
+      }
     }
     accumulator -= FIXED_DT;
   }

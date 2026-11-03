@@ -19,7 +19,8 @@ import { readFileSync, existsSync } from 'fs';
 import { join, extname } from 'path';
 import { CONFIG } from '../src/config.js';
 import { MAP_POOL } from '../src/MapCatalog.js';
-import { BASE_OBSTACLES, resolveHorizontal } from '../src/WorldCollision.js';
+import { BASE_OBSTACLES, resolveHorizontal, supportHeight } from '../src/WorldCollision.js';
+import { getMapObstacles } from '../src/MapLayouts.js';
 
 const C = CONFIG.COMBAT;
 const NET = CONFIG.NETWORK;
@@ -141,7 +142,9 @@ function rayAabb(origin, dir, min, max) {
 
 function serverRaycast(origin, dir, ignoreTarget) {
   let best = null;
-  for (const obs of OBSTACLES) {
+  const mapObstacles = getMapObstacles(currentMap);
+  const obstacles = mapObstacles ? mapObstacles.map(box => ({ name: box.name, min: [box.minX, box.minY, box.minZ], max: [box.maxX, box.height, box.maxZ] })) : OBSTACLES;
+  for (const obs of obstacles) {
     if (ignoreTarget && obs.name === ignoreTarget) continue;
     const t = rayAabb(origin, dir, obs.min, obs.max);
     if (t !== null) {
@@ -486,8 +489,15 @@ function simulate() {
         p.velocityY = 0;
         p.grounded = true;
       }
-      const resolved = resolveHorizontal({ x: p.lastPos[0], z: p.lastPos[2] }, { x: p.pos[0], z: p.pos[2] }, p.pos[1] - M.STAND_HEIGHT / 2);
+      const mapObstacles = getMapObstacles(currentMap);
+      const resolved = resolveHorizontal({ x: p.lastPos[0], z: p.lastPos[2] }, { x: p.pos[0], z: p.pos[2] }, p.pos[1] - M.STAND_HEIGHT / 2, mapObstacles || undefined, 58, .4, mapObstacles ? .4 : 0);
       p.pos[0] = resolved.x; p.pos[2] = resolved.z;
+      if (mapObstacles) {
+        const ground = supportHeight(p.pos[0], p.pos[2], p.lastPos[1] - M.STAND_HEIGHT / 2, mapObstacles);
+        if (p.velocityY <= 0 && p.pos[1] - M.STAND_HEIGHT / 2 <= ground) {
+          p.pos[1] = ground + M.STAND_HEIGHT / 2; p.velocityY = 0; p.grounded = true;
+        } else if (p.pos[1] - M.STAND_HEIGHT / 2 > ground + .001) p.grounded = false;
+      }
       p.yaw = input.yaw; p.pitch = input.pitch;
 
       // --- Server-side speed validation (spec §9.3) ---
