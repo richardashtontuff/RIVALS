@@ -92,6 +92,52 @@ export const KEY_TIER_COSTS = {
   Contraband: [600, 700],
 };
 
+/** Free Trials (spec §6.1): watch an ad for a single-duel trial of any locked
+ * standard weapon. Returns { allowed, reason, expiresAt }. */
+export function startFreeTrial(player, weaponKey) {
+  const w = W[weaponKey];
+  if (!w) return { allowed: false, reason: 'unknown weapon' };
+  if (w.tier !== 'Standard') return { allowed: false, reason: 'standard weapons only' };
+  if (player.ownedWeapons && player.ownedWeapons.has(weaponKey)) {
+    return { allowed: false, reason: 'already owned' };
+  }
+  const now = Date.now();
+  if (!player.freeTrials) player.freeTrials = {};
+  const existing = player.freeTrials[weaponKey];
+  if (existing && existing > now) {
+    return { allowed: false, reason: 'trial already active' };
+  }
+  // Trial lasts for one duel (10 minutes)
+  player.freeTrials[weaponKey] = now + 10 * 60 * 1000;
+  return { allowed: true, expiresAt: player.freeTrials[weaponKey] };
+}
+
+/** Check if a free trial is active for a weapon. */
+export function isFreeTrialActive(player, weaponKey) {
+  if (!player.freeTrials || !player.freeTrials[weaponKey]) return false;
+  return Date.now() < player.freeTrials[weaponKey];
+}
+
+/** Check if a player can use a weapon (owned OR free trial active). */
+export function canUseWeapon(player, weaponKey) {
+  const w = W[weaponKey];
+  if (!w) return { allowed: false, reason: 'unknown weapon' };
+  const gate = LEVEL_GATES[weaponKey];
+  if (gate && player.level < gate) {
+    return { allowed: false, reason: `requires Level ${gate}` };
+  }
+  if (player.ownedWeapons && player.ownedWeapons.has(weaponKey)) {
+    return { allowed: true };
+  }
+  if (isFreeTrialActive(player, weaponKey)) {
+    return { allowed: true };
+  }
+  if (w.cost > 0 && player.keys < w.cost) {
+    return { allowed: false, reason: `needs ${w.cost} keys` };
+  }
+  return { allowed: true };
+}
+
 /** Update contract progress for a weapon. */
 export function updateContract(player, weaponKey, { eliminations = 0, playtimeMinutes = 0 } = {}) {
   if (!player.contracts) player.contracts = {};

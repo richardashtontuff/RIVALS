@@ -592,6 +592,9 @@ const setCrossOutline = document.getElementById('setCrossOutline');
 const setCrossStatic = document.getElementById('setCrossStatic');
 const setGraphics = document.getElementById('setGraphics');
 const setMaxFps = document.getElementById('setMaxFps');
+const setNoTextures = document.getElementById('setNoTextures');
+const setNoSkybox = document.getElementById('setNoSkybox');
+const setNoHands = document.getElementById('setNoHands');
 
 const settings = {
   fov: UI.FOV,
@@ -602,6 +605,9 @@ const settings = {
   crossStatic: UI.CROSSHAIR_STATIC,
   graphics: 'medium',
   maxFps: 144,
+  noTextures: false,
+  noSkybox: false,
+  noHands: false,
 };
 
 function openSettings() {
@@ -614,6 +620,9 @@ function openSettings() {
   setCrossStatic.checked = settings.crossStatic;
   setGraphics.value = settings.graphics;
   setMaxFps.value = settings.maxFps || 144;
+  setNoTextures.checked = settings.noTextures;
+  setNoSkybox.checked = settings.noSkybox;
+  setNoHands.checked = settings.noHands;
   // pause input while settings open
   document.exitPointerLock();
 }
@@ -630,7 +639,17 @@ function applySettings() {
   settings.crossStatic = setCrossStatic.checked;
   settings.graphics = setGraphics.value;
   settings.maxFps = parseInt(setMaxFps.value, 10) || 0;
+  settings.noTextures = setNoTextures.checked;
+  settings.noSkybox = setNoSkybox.checked;
+  settings.noHands = setNoHands.checked;
   camera.fov = settings.fov;
+
+  // Texture packs (spec §8.3)
+  if (settings.noSkybox) {
+    scene.background = null; // remove skybox/background
+  } else {
+    scene.background = new THREE.Color(0xe8e8e8);
+  }
   camera.updateProjectionMatrix();
   // Apply crosshair
   crosshairDot.style.background = settings.crossColor;
@@ -663,6 +682,9 @@ resetSettings.addEventListener('click', () => {
   settings.crossStatic = false;
   settings.graphics = 'medium';
   settings.maxFps = 144;
+  settings.noTextures = false;
+  settings.noSkybox = false;
+  settings.noHands = false;
   applySettings();
   openSettings();
 });

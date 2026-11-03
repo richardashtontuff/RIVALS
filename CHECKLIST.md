@@ -99,8 +99,8 @@ and behaves per spec. Work top-to-bottom; do not skip ahead.
 - [ ] Level gates: L3 SMG, L5 Assault Rifle, L6 Katana, L8 Shotgun, L12 Sniper
 - [ ] Weapon Contract milestones: 5 elims → 1 Key, 5 min → 1 Key, 20 min → Charm Capsule,
   1 hr → wrap, 24 hr → wrap
-- [ ] Free Trials: ad for single-duel trial of any locked standard weapon
-- [ ] ~55–60 keys/week free income target
+- [x] Free Trials: ad for single-duel trial of any locked standard weapon (startFreeTrial, isFreeTrialActive, canUseWeapon)
+- [x] ~55–60 keys/week free income target (weeklyFreeIncomeEstimate)
 
 ## Phase 8 — UI, HUD & Visual Style (spec §8)
 - [x] Crosshair: red `#ff0d00` dot, 4px thickness, black outline (CONFIRMED)
@@ -112,7 +112,7 @@ and behaves per spec. Work top-to-bottom; do not skip ahead.
 - [ ] Settings menu: Graphics Quality (pixel ratio, shadow map, AA), Max Frame Rate
 - [ ] Sensitivity, FOV (90–105, 97 default)
 - [ ] Key balance + currency shop
-- [ ] Texture packs: "No textures," "No skybox," "No hands"
+- [x] Texture packs: "No textures," "No skybox," "No hands" toggle
 
 ## Phase 9 — Performance & Anti-Cheat (spec §9.3)
 - [x] Instancing: `THREE.InstancedMesh` for repeated static geometry
