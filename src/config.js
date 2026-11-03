@@ -299,10 +299,10 @@ export const CONFIG = {
 
 // Starter kit per spec §4.1
 export const STARTER_LOADOUT = {
-  primary: 'ASSAULT_RIFLE',
-  secondary: 'HANDGUN',
-  melee: 'FISTS',
-  utility: 'GRENADE',
+  Primary: 'ASSAULT_RIFLE',
+  Secondary: 'HANDGUN',
+  Melee: 'FISTS',
+  Utility: 'GRENADE',
 };
 
 // Default competitive loadout used by the client prototype.
