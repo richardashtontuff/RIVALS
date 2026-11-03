@@ -18,6 +18,7 @@ import { WebSocketServer } from 'ws';
 import { readFileSync, existsSync } from 'fs';
 import { join, extname } from 'path';
 import { CONFIG } from '../src/config.js';
+import { MAP_POOL } from '../src/MapCatalog.js';
 
 const C = CONFIG.COMBAT;
 const NET = CONFIG.NETWORK;
@@ -89,10 +90,7 @@ function checkRankedEntry(player) {
 // Map voting (spec §1 / §5)
 let mapVotes = new Map();        // mapName -> count
 let votingPlayers = new Set();   // playerIds who have voted
-const MAP_POOL = ['Arena', 'Backrooms', 'Battleground', 'Bridge', 'Chess',
-  'Construction', 'Crossroads', 'Dimension', 'Docks', 'Graveyard', 'Iceberg',
-  'Museum', 'Onyx', 'Playground', 'Sandbox', 'Station', 'Studio', 'Village',
-  'Westown', 'Shooting Range'];
+
 
 function resetVotes() {
   mapVotes = new Map();
@@ -186,9 +184,11 @@ function startRound() {
   for (const [id, p] of players) {
     ensureScore(id);
     p.health = C.DEFAULT_HEALTH;
+    p.alive = true;
     p.pos = [0, 1, 10];
     p.history = [];
     if (Math.random() < 0.5) p.pos = [0, 1, -10]; // alternate spawn for duel
+    p.lastPos = [...p.pos]; // Respawning is not a speed violation.
   }
   console.log(`[server] ROUND ACTIVE — map: ${currentMap}`);
 }
@@ -569,7 +569,7 @@ wss.on('connection', (ws) => {
           }
           break;
         case 'vote_map':
-          if (roundState === 'INTERMISSION' && msg.map) {
+          if (roundState === 'INTERMISSION' && ws.playerId && players.has(ws.playerId) && MAP_POOL.includes(msg.map)) {
             if (!votingPlayers.has(ws.playerId)) {
               votingPlayers.add(ws.playerId);
               const current = mapVotes.get(msg.map) || 0;

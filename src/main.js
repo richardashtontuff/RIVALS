@@ -13,6 +13,7 @@
  */
 import * as THREE from '/node_modules/three/build/three.module.js';
 import { CONFIG, STARTER_LOADOUT, DEFAULT_LOADOUT } from './config.js';
+import { mapPreviewPath } from './MapCatalog.js';
 import { MovementController } from './MovementController.js';
 import { validateLoadout, DEFAULT_LOADOUT as LOADOUT_DEFAULT } from './LoadoutSystem.js';
 import { WeaponSystem } from './WeaponSystem.js';
@@ -139,7 +140,8 @@ Object.assign(mapVoteUI.style, {
   position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)',
   color: '#fff', fontSize: '1.2rem', pointerEvents: 'auto', userSelect: 'none',
   textShadow: '0 0 10px rgba(0,0,0,0.9)', textAlign: 'center', display: 'none',
-  background: 'rgba(0,0,0,0.7)', padding: '2rem', borderRadius: '8px',
+  background: 'rgba(0,0,0,0.88)', padding: '1rem', borderRadius: '8px',
+  width: 'min(1000px, 96vw)', maxHeight: '86vh', overflowY: 'auto', zIndex: 20,
 });
 const mapVoteTitle = document.createElement('div');
 mapVoteTitle.style.fontSize = '1.5rem';
@@ -266,22 +268,39 @@ buildInstancedCrates(36, 6);
 buildLODModel();
 
 // ------------------------------------------------------------------ Map (spec §5)
-let currentMapName = 'Arena';
+let currentMapName = null;
 let mapMechanics = null;
+let mapGroup = null;
 
 function loadMap(mapName) {
-  // Clear previous map mechanics objects (keep base world)
+  if (!MAP_METADATA[mapName] || mapName === currentMapName) return;
+  if (mapGroup) {
+    world.remove(mapGroup);
+    const geometries = new Set();
+    const materials = new Set();
+    mapGroup.traverse(object => {
+      if (object.geometry) geometries.add(object.geometry);
+      if (object.material) {
+        for (const material of (Array.isArray(object.material) ? object.material : [object.material])) materials.add(material);
+      }
+    });
+    geometries.forEach(geometry => geometry.dispose());
+    materials.forEach(material => material.dispose());
+  }
+  mapGroup = new THREE.Group();
+  world.add(mapGroup);
   currentMapName = mapName;
-  const result = buildProceduralMap(mapName, scene, world);
+  const result = buildProceduralMap(mapName, scene, mapGroup);
   mapMechanics = result.mechanics;
   infoEl.textContent = `Map: ${mapName}` + (isBigMap(mapName) ? ' (BIG)' : '');
 }
-loadMap(currentMapName);
+loadMap('Arena');
 
 // ------------------------------------------------------------------ Networking (spec §7)
 let socket = null;
 let myPlayerId = null;
 let myLatency = 0;
+let playerHealth = C.DEFAULT_HEALTH;
 const remotePlayers = new Map(); // id -> {mesh, health}
 
 function connect() {
@@ -305,6 +324,7 @@ function connect() {
         mc.position.set(msg.spawn[0], msg.spawn[1], msg.spawn[2]);
         mapPool = msg.mapPool || mapPool;
         mapVotes = msg.mapVotes || mapVotes;
+        loadMap(msg.currentMap);
         netStatus.textContent = `server • id ${myPlayerId.slice(0,4)}`;
         netStatus.style.color = '#44ff44';
         break;
@@ -315,18 +335,18 @@ function connect() {
       case 'hit_confirmed':
         showHitmarker();
         infoEl.textContent = `${msg.headshot ? 'HEADSHOT ' : ''}hit ${msg.targetId.slice(0,4)} for ${msg.damage}`;
-        if (msg.headshot) ws.weaponSystem?.applyFlashbang(0);
+        if (msg.headshot) weaponSystem.applyFlashbang(0);
         break;
       case 'damage_taken':
-        C.DEFAULT_HEALTH = Math.max(0, msg.health);
-        hpEl.textContent = `HP ${C.DEFAULT_HEALTH}`;
+        playerHealth = Math.max(0, msg.health);
+        hpEl.textContent = `HP ${playerHealth}`;
         if (msg.health <= 0) myAlive = false;
         break;
       case 'slowed':
-        ws.weaponSystem?.slowPlayer(msg.playerId, msg.duration, msg.factor);
+        weaponSystem.slowPlayer(msg.playerId, msg.duration, msg.factor);
         break;
       case 'frozen':
-        ws.weaponSystem?.freezePlayer(msg.playerId, msg.duration);
+        weaponSystem.freezePlayer(msg.playerId, msg.duration);
         break;
       case 'hit_rejected':
         console.log('[net] fire rejected:', msg.reason);
@@ -348,7 +368,13 @@ function connect() {
 connect();
 
 function onSnapshot(msg) {
+  const previousRoundState = roundState;
   roundState = msg.roundState || roundState;
+  if (roundState === 'INTERMISSION' && previousRoundState !== 'INTERMISSION') {
+    hasVoted = false;
+    if (document.pointerLockElement) document.exitPointerLock();
+  }
+  loadMap(msg.currentMap);
   roundTimer = msg.roundTimer;
   roundWinnerId = msg.roundWinnerId;
   matchWinScore = msg.matchWinScore || 5;
@@ -358,12 +384,13 @@ function onSnapshot(msg) {
   // Update local player keys from snapshot
   const me = msg.players.find(p => p.id === myPlayerId);
   if (me && me.keys !== undefined) setKeys(me.keys);
+  if (me && Number.isFinite(me.health)) playerHealth = me.health;
 
   // Apply server-confirmed status effects
   if (msg.effects) {
     for (const e of msg.effects) {
-      if (e.type === 'slow') ws.weaponSystem?.slowPlayer(e.target, e.duration, e.factor);
-      if (e.type === 'freeze') ws.weaponSystem?.freezePlayer(e.target, e.duration);
+      if (e.type === 'slow') weaponSystem.slowPlayer(e.target, e.duration, e.factor);
+      if (e.type === 'freeze') weaponSystem.freezePlayer(e.target, e.duration);
     }
   }
 
@@ -393,9 +420,9 @@ function onSnapshot(msg) {
     entry.mesh.userData.health = p.health;
     entry.mesh.visible = p.health > 0;
     // Permafrost slow visual tint
-    if (ws.weaponSystem && ws.weaponSystem.isFrozen(p.id, msg.t)) {
+    if (weaponSystem.isFrozen(p.id, msg.t)) {
       entry.mesh.material.color.set(0x00ffff);
-    } else if (ws.weaponSystem && ws.weaponSystem.slowFactorFor(p.id, msg.t) < 1) {
+    } else if (weaponSystem.slowFactorFor(p.id, msg.t) < 1) {
       entry.mesh.material.color.set(0xaaaaaa);
     } else {
       entry.mesh.material.color.set(0x4488ff);
@@ -466,7 +493,7 @@ window.addEventListener('mousemove', (e) => {
   }
 });
 canvasEl.addEventListener('click', () => {
-  if (!document.pointerLockElement) canvasEl.requestPointerLock();
+  if (!document.pointerLockElement && roundState !== 'INTERMISSION') canvasEl.requestPointerLock();
 });
 document.addEventListener('pointerlockchange', () => {
   const locked = document.pointerLockElement === canvasEl;
@@ -611,7 +638,6 @@ const weaponSystem = new WeaponSystem(mc, scene, world, {
   },
   getRemotePlayers: () => remotePlayers,
 });
-socket.weaponSystem = weaponSystem;
 
 // ------------------------------------------------------------------ Kill feed (spec §8.4)
 const killfeedEl = document.getElementById('killfeed');
@@ -768,29 +794,43 @@ let mapPool = [];
 let mapVotes = {};
 let hasVoted = false;
 
-// Map vote UI rendering
+// Only rebuild when vote data changes; rebuilding every frame destroys keyboard focus.
+let lastVoteRender = '';
 function renderMapVote() {
-  mapVoteUI.style.display = roundState === 'ROUND_INTERMISSION' ? 'block' : 'none';
-  if (roundState !== 'ROUND_INTERMISSION') return;
-  mapVoteButtons.innerHTML = '';
+  const visible = roundState === 'INTERMISSION';
+  mapVoteUI.style.display = visible ? 'block' : 'none';
+  if (!visible) { lastVoteRender = ''; return; }
+  const signature = JSON.stringify([mapPool, mapVotes, hasVoted]);
+  if (signature === lastVoteRender) return;
+  lastVoteRender = signature;
+  mapVoteButtons.replaceChildren();
   for (const mapName of mapPool) {
     const votes = mapVotes[mapName] || 0;
     const btn = document.createElement('button');
-    btn.textContent = `${mapName} (${votes})`;
-    btn.style.padding = '0.5rem 1rem';
-    btn.style.background = hasVoted ? '#555' : '#444';
-    btn.style.color = '#fff';
-    btn.style.border = '1px solid #777';
-    btn.style.borderRadius = '4px';
-    btn.style.cursor = hasVoted ? 'not-allowed' : 'pointer';
+    btn.type = 'button';
+    btn.setAttribute('aria-label', `${mapName}, ${votes} ${votes === 1 ? 'vote' : 'votes'}`);
+    Object.assign(btn.style, {
+      width: '150px', padding: '0', overflow: 'hidden', textAlign: 'left',
+      background: '#282d37', color: '#fff', border: '1px solid #777',
+      borderRadius: '6px', cursor: hasVoted ? 'default' : 'pointer',
+    });
+    const preview = document.createElement('img');
+    preview.src = mapPreviewPath(mapName) || '';
+    preview.alt = '';
+    preview.loading = 'lazy';
+    Object.assign(preview.style, { width: '100%', height: '84px', objectFit: 'cover', display: 'block', background: '#414b5c' });
+    preview.onerror = () => { preview.style.visibility = 'hidden'; };
+    const label = document.createElement('span');
+    label.textContent = `${mapName} (${votes})`;
+    Object.assign(label.style, { display: 'block', padding: '0.5rem', fontWeight: '600' });
+    btn.append(preview, label);
     btn.disabled = hasVoted;
-    if (!hasVoted) {
-      btn.onclick = () => {
-        socket.send(JSON.stringify({ type: 'vote_map', map: mapName }));
-        hasVoted = true;
-        renderMapVote();
-      };
-    }
+    btn.onclick = () => {
+      if (socket?.readyState !== WebSocket.OPEN) return;
+      socket.send(JSON.stringify({ type: 'vote_map', map: mapName }));
+      hasVoted = true;
+      renderMapVote();
+    };
     mapVoteButtons.appendChild(btn);
   }
 }
@@ -799,7 +839,7 @@ function updateRoundUI() {
   roundUI.style.display = 'block';
   let stateText = roundState;
   if (roundState === 'ROUND_ACTIVE') stateText = 'ROUND ACTIVE';
-  else if (roundState === 'ROUND_INTERMISSION') stateText = 'INTERMISSION';
+  else if (roundState === 'INTERMISSION') stateText = 'INTERMISSION';
   else if (roundState === 'ROUND_END') stateText = roundWinnerId === myPlayerId ? 'ROUND WON' : 'ROUND LOST';
   else if (roundState === 'ROUND_MATCH_END') stateText = 'MATCH END';
   else if (roundState === 'LOBBY') stateText = 'LOBBY';
@@ -834,7 +874,7 @@ function leaderboard() {
 // ------------------------------------------------------------------ Fire
 function fireWeapon() {
   if (roundState !== 'ROUND_ACTIVE' || !myAlive) return;
-  if (ws.weaponSystem && ws.weaponSystem.isBlinded(now())) return; // flashbang blocks fire
+  if (weaponSystem.isBlinded(now())) return; // flashbang blocks fire
   const key = currentWeaponKey();
   const w = W[key];
   if (!w) return;
@@ -890,7 +930,7 @@ let accumulator = 0;
 let lastInputSend = 0;
 
 function updateHUD() {
-  hpEl.textContent = `HP ${Math.max(0, C.DEFAULT_HEALTH)}`;
+  hpEl.textContent = `HP ${Math.max(0, playerHealth)}`;
   updateSlotsUI();
   renderMapVote();
 
@@ -921,8 +961,8 @@ function frame(now) {
     foot.y = mc.position.y; // character feet
     const dmg = checkLava(mapMechanics, foot, mc, now);
     if (dmg !== null) {
-      C.DEFAULT_HEALTH = Math.max(0, C.DEFAULT_HEALTH - dmg);
-      hpEl.textContent = `HP ${C.DEFAULT_HEALTH}`;
+      playerHealth = Math.max(0, playerHealth - dmg);
+      hpEl.textContent = `HP ${playerHealth}`;
     }
     // Museum scanner buzzer (spec §5)
     checkScanner(mapMechanics, mc.position);

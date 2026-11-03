@@ -52,7 +52,7 @@ export const CONFIG = {
   COMBAT: {
     HITMARKER_DURATION_MS: 120,
     MAX_RANGE: 200,
-    DEFAULT_HEALTH: 100,
+    DEFAULT_HEALTH: 150,
     // Headshot multipliers are weapon-specific; null = use crit table.
   },
 
