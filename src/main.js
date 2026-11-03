@@ -54,7 +54,9 @@ const C = CONFIG.COMBAT;
 const NET = CONFIG.NETWORK;
 const UI = CONFIG.UI;
 
-const WS_URL = `ws://${window.location.hostname}:5074`;
+const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+const port = window.location.port ? `:${window.location.port}` : '';
+const WS_URL = `${protocol}//${window.location.hostname}${port}`;
 
 // ------------------------------------------------------------------ Validate starter
 const starterCheck = validateLoadout(STARTER_LOADOUT);

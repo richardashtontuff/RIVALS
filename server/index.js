@@ -1,6 +1,7 @@
 /**
- * RIVALS (Web Edition) — Authoritative WebSocket server (spec §1 + §7).
+ * RIVALS (Web Edition) — Combined HTTP + WebSocket server (spec §1 + §7).
  *
+ * Single instance serving both static files and authoritative WebSocket.
  * Round state machine (server-authoritative):
  *   Lobby → Intermission (Map Vote) → Round Active → Round End →
  *   [score < 5: Intermission] → [score = 5: Match End]
@@ -12,7 +13,10 @@
  *
  * Fixed 20 Hz simulation tick; max rewind window 250 ms.
  */
+import { createServer } from 'http';
 import { WebSocketServer } from 'ws';
+import { readFileSync, existsSync } from 'fs';
+import { join, extname } from 'path';
 import { CONFIG } from '../src/config.js';
 
 const C = CONFIG.COMBAT;
@@ -20,38 +24,37 @@ const NET = CONFIG.NETWORK;
 const M = CONFIG.MOVEMENT;
 const W = CONFIG.WEAPONS;
 
-const PORT = process.env.PORT || 5074;
+const PORT = process.env.PORT || 3000;
 const TICK_INTERVAL = 1000 / NET.TICK_RATE; // 50 ms
 const MAX_REWIND_MS = NET.MAX_REWIND_MS;
 const POSITION_HISTORY_MS = 300;
 
-// Round timing (spec §1)
+// MIME types for static file serving
+const MIME_TYPES = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.svg': 'image/svg+xml',
+  '.ico': 'image/x-icon',
+  '.wav': 'audio/wav',
+  '.mp3': 'audio/mpeg',
+  '.ogg': 'audio/ogg',
+  '.wasm': 'application/wasm',
+  '.glb': 'model/gltf-binary',
+  '.gltf': 'model/gltf+json',
+  '.txt': 'text/plain; charset=utf-8',
+};
+
+// ----------------------------------------------------------------- Round timing (spec §1)
 const ROUND_TIME_S = 180;        // 3 minute rounds
 const INTERMISSION_TIME_S = 15;  // map vote duration
 const MATCH_WIN_SCORE = 5;       // first to 5 round wins
-
-// Map voting (spec §1 / §5)
-let mapVotes = new Map();        // mapName -> count
-let votingPlayers = new Set();   // playerIds who have voted
-const MAP_POOL = ['Arena', 'Backrooms', 'Battleground', 'Bridge', 'Chess',
-  'Construction', 'Crossroads', 'Dimension', 'Docks', 'Graveyard', 'Iceberg',
-  'Museum', 'Onyx', 'Playground', 'Sandbox', 'Station', 'Studio', 'Village',
-  'Westown', 'Shooting Range'];
-
-function resetVotes() {
-  mapVotes = new Map();
-  for (const m of MAP_POOL) mapVotes.set(m, 0);
-  votingPlayers = new Set();
-}
-
-function getWinningMap() {
-  let best = MAP_POOL[0];
-  let bestCount = -1;
-  for (const [m, c] of mapVotes) {
-    if (c > bestCount) { bestCount = c; best = m; }
-  }
-  return best;
-}
 
 // Game modes (spec §2)
 const MODE_DUEL = 'DUEL';        // 1v1-5v5, first to 5 round wins
@@ -83,12 +86,28 @@ function checkRankedEntry(player) {
   return player.level >= 100 && player.verified === true;
 }
 
-// Round state enum
-const ROUND_LOBBY = 'LOBBY';
-const ROUND_INTERMISSION = 'INTERMISSION';
-const ROUND_ACTIVE = 'ROUND_ACTIVE';
-const ROUND_END = 'ROUND_END';
-const ROUND_MATCH_END = 'MATCH_END';
+// Map voting (spec §1 / §5)
+let mapVotes = new Map();        // mapName -> count
+let votingPlayers = new Set();   // playerIds who have voted
+const MAP_POOL = ['Arena', 'Backrooms', 'Battleground', 'Bridge', 'Chess',
+  'Construction', 'Crossroads', 'Dimension', 'Docks', 'Graveyard', 'Iceberg',
+  'Museum', 'Onyx', 'Playground', 'Sandbox', 'Station', 'Studio', 'Village',
+  'Westown', 'Shooting Range'];
+
+function resetVotes() {
+  mapVotes = new Map();
+  for (const m of MAP_POOL) mapVotes.set(m, 0);
+  votingPlayers = new Set();
+}
+
+function getWinningMap() {
+  let best = MAP_POOL[0];
+  let bestCount = -1;
+  for (const [m, c] of mapVotes) {
+    if (c > bestCount) { bestCount = c; best = m; }
+  }
+  return best;
+}
 
 // ----------------------------------------------------------------- Helpers
 function now() { return performance.now(); }
@@ -137,36 +156,14 @@ function dist3(a, b) {
 function pLastFire(p) { return p.lastFireTime; }
 function setLastFire(p, t) { p.lastFireTime = t; }
 
-/** Compute body damage with falloff + headshot crit (spec §4.2 / §4.3).
- *  Returns { damage, isHeadshot }. Server-authoritative. */
-function computeDamage(w, distMeters, isHeadshot) {
-  const body = w.noFalloff
-    ? w.damage.start
-    : (() => {
-        const range = w.range || 100;
-        const t = Math.min(1, distMeters / range);
-        return w.damage.start + (w.damage.end - w.damage.start) * t;
-      })();
-  let dmg = body;
-  if (isHeadshot) {
-    if (w.crit) dmg = w.crit.start;            // explicit crit damage
-    else if (w.critMult) dmg = body * w.critMult; // multiplier
-    else dmg = body * 2;                        // default 2× headshot
-  }
-  return { damage: Math.max(0, dmg), isHeadshot };
-}
-
-/** Head zone: hit is a headshot if above ~75% of target height. */
-function isHeadshotPoint(hitPoint, targetPos, targetHeight = 1.7) {
-  return hitPoint[1] > targetPos[1] + targetHeight * 0.75;
-}
-
 // ----------------------------------------------------------------- Game state (round machine)
 const scores = new Map(); // playerId -> round wins
-let roundState = ROUND_LOBBY;
+let roundState = 'LOBBY';
 let roundTimer = INTERMISSION_TIME_S;
 let roundWinnerId = null;
 let currentMap = 'Arena';
+
+resetVotes();
 
 function ensureScore(id) { if (!scores.has(id)) scores.set(id, 0); }
 function leaderboard() {
@@ -174,14 +171,15 @@ function leaderboard() {
 }
 
 function startIntermission() {
-  roundState = ROUND_INTERMISSION;
+  roundState = 'INTERMISSION';
   roundTimer = INTERMISSION_TIME_S;
   roundWinnerId = null;
+  resetVotes();
   console.log(`[server] INTERMISSION (map vote) — scores: ${JSON.stringify(Object.fromEntries(scores))}`);
 }
 
 function startRound() {
-  roundState = ROUND_ACTIVE;
+  roundState = 'ROUND_ACTIVE';
   roundTimer = ROUND_TIME_S;
   roundWinnerId = null;
   // Respawn all players
@@ -192,11 +190,11 @@ function startRound() {
     p.history = [];
     if (Math.random() < 0.5) p.pos = [0, 1, -10]; // alternate spawn for duel
   }
-  console.log(`[server] ROUND ACTIVE`);
+  console.log(`[server] ROUND ACTIVE — map: ${currentMap}`);
 }
 
 function endRound(winnerId) {
-  roundState = ROUND_END;
+  roundState = 'ROUND_END';
   roundWinnerId = winnerId; // string for Duel, comma-list for FFA top-5
   roundTimer = 6; // show results for 6s
   if (currentGameMode === MODE_DUEL && winnerId) {
@@ -224,7 +222,7 @@ function endRound(winnerId) {
   if (currentGameMode === MODE_DUEL) {
     const matchWinner = lb.find((e) => e.score >= MATCH_WIN_SCORE);
     if (matchWinner) {
-      roundState = ROUND_MATCH_END;
+      roundState = 'ROUND_MATCH_END';
       roundTimer = 10;
       console.log(`[server] MATCH END — ${matchWinner.id.slice(0,4)} wins match`);
     }
@@ -286,8 +284,8 @@ function handleJoin(ws, payload) {
     level: p.level, elo: p.elo, verified: p.verified,
   }));
   console.log(`[server] player joined: ${id} (${players.size} total)`);
-  // If we have 2 players and in lobby, start a round shortly
-  if (players.size >= 2 && roundState === ROUND_LOBBY) startIntermission();
+  // If we have 2 players and in lobby, start intermission shortly
+  if (players.size >= 2 && roundState === 'LOBBY') startIntermission();
 }
 
 function handleInput(ws, payload) {
@@ -304,7 +302,7 @@ function handleInput(ws, payload) {
 function handleFire(ws, payload) {
   const shooter = players.get(ws.playerId);
   if (!shooter || !shooter.alive) return;
-  if (roundState !== ROUND_ACTIVE) return;
+  if (roundState !== 'ROUND_ACTIVE') return;
 
   const weaponKey = payload.weaponKey || 'ASSAULT_RIFLE';
   const w = W[weaponKey];
@@ -357,15 +355,27 @@ function handleFire(ws, payload) {
 
   // Apply authoritative damage (falloff + headshot)
   const distMeters = dist3(shooterPos, hitPosition);
-  const headshot = hitTargetId ? isHeadshotPoint(hitPosition, players.get(hitTargetId).pos) : false;
-  const { damage: dmg } = computeDamage(w, distMeters, headshot);
+  const headshot = hitTargetId ? (hitPosition[1] > players.get(hitTargetId).pos[1] + 1.7 * 0.75) : false;
+  const body = w.noFalloff ? w.damage.start : (() => {
+    const range = w.range || 100;
+    const t = Math.min(1, distMeters / range);
+    return w.damage.start + (w.damage.end - w.damage.start) * t;
+  })();
+  let dmg = body;
+  if (headshot) {
+    if (w.crit) dmg = w.crit.start;
+    else if (w.critMult) dmg = body * w.critMult;
+    else dmg = body * 2;
+  }
+  dmg = Math.max(0, dmg);
+
   if (hitTargetId) {
     const target = players.get(hitTargetId);
     if (target && target.alive) {
       target.health = Math.max(0, target.health - dmg);
       console.log(`[server] ${shooter.id.slice(0,4)} ${headshot?'HEADSHOT ':''}hit ${target.id.slice(0,4)} for ${dmg} → ${target.health} (dist ${distMeters.toFixed(1)}m)`);
       ws.send(JSON.stringify({ type: 'hit_confirmed', targetId: hitTargetId, damage: dmg, targetHealth: target.health, headshot }));
-      const tWs = Array.from(wsServer.clients).find(c => c.playerId === hitTargetId);
+      const tWs = Array.from(wss.clients).find(c => c.playerId === hitTargetId);
       if (tWs && tWs.readyState === WebSocket.OPEN)
         tWs.send(JSON.stringify({ type: 'damage_taken', damage: dmg, health: target.health, attackerId: shooter.id }));
 
@@ -377,10 +387,8 @@ function handleFire(ws, payload) {
         // Key reward for elimination (spec §6)
         shooter.keys = (shooter.keys || 0) + 1;
         const victimId = target.id;
-
+        ws.send(JSON.stringify({ type: 'elimination', victimId, attackerId: shooter.id }));
         if (currentGameMode === MODE_DUEL) {
-          // Round over: shooter wins the round
-          ws.send(JSON.stringify({ type: 'elimination', victimId, attackerId: shooter.id }));
           endRound(shooter.id);
         } else if (currentGameMode === MODE_GUN_GAME) {
           // Cycle to next weapon on kill
@@ -409,14 +417,14 @@ function simulate() {
   const dt = 1 / NET.TICK_RATE;
 
   // Round state machine transitions
-  if (roundState === ROUND_INTERMISSION) {
+  if (roundState === 'INTERMISSION') {
     roundTimer -= dt;
     if (roundTimer <= 0) {
       currentMap = getWinningMap();
       console.log(`[server] Map vote complete: ${currentMap}`);
       startRound();
     }
-  } else if (roundState === ROUND_ACTIVE) {
+  } else if (roundState === 'ROUND_ACTIVE') {
     roundTimer -= dt;
     // Apply player movement
     for (const p of players.values()) {
@@ -438,7 +446,6 @@ function simulate() {
       p.yaw = input.yaw; p.pitch = input.pitch;
 
       // --- Server-side speed validation (spec §9.3) ---
-      // Allow 1.5x tolerance; dash/slide exceptions handled by client prediction.
       const maxAllowed = M.SPRINT_SPEED * dt * NET.SERVER_MOVE_TOLERANCE;
       const disp = dist3(p.pos, p.lastPos);
       if (disp > maxAllowed) {
@@ -463,15 +470,15 @@ function simulate() {
         endRound(null);
       }
     }
-  } else if (roundState === ROUND_END) {
+  } else if (roundState === 'ROUND_END') {
     roundTimer -= dt;
     if (roundTimer <= 0) {
-      if (roundState !== ROUND_MATCH_END) startIntermission();
+      if (roundState !== 'ROUND_MATCH_END') startIntermission();
     }
-  } else if (roundState === ROUND_MATCH_END) {
+  } else if (roundState === 'ROUND_MATCH_END') {
     roundTimer -= dt;
     if (roundTimer <= 0) startIntermission(); // rematch
-  } else if (roundState === ROUND_LOBBY) {
+  } else if (roundState === 'LOBBY') {
     // waiting for players
   }
 }
@@ -481,7 +488,7 @@ function recordAllHistory() {
 }
 
 // ----------------------------------------------------------------- Snapshot broadcast
-function broadcastSnapshot(wsServer) {
+function broadcastSnapshot() {
   const snapshot = {
     type: 'snapshot', t: now(), roundState, roundTimer,
     scores: Object.fromEntries(scores), roundWinnerId,
@@ -497,16 +504,49 @@ function broadcastSnapshot(wsServer) {
     });
   }
   const msg = JSON.stringify(snapshot);
-  for (const client of wsServer.clients) {
+  for (const client of wss.clients) {
     if (client.readyState === WebSocket.OPEN) client.send(msg);
   }
 }
 
-// ----------------------------------------------------------------- WebSocket server
-const wsServer = new WebSocketServer({ port: PORT });
-console.log(`[server] RIVALS authoritative server listening on :${PORT}`);
+// ----------------------------------------------------------------- HTTP server (static files + WebSocket on one port)
+function serveStatic(req, res) {
+  let url = req.url === '/' ? '/index.html' : req.url;
+  // Security: prevent path traversal
+  if (url.includes('..')) {
+    res.writeHead(403);
+    res.end('Forbidden');
+    return;
+  }
+  let filePath = join(process.cwd(), url);
+  if (!existsSync(filePath)) {
+    // Try adding .html
+    if (!extname(filePath) && existsSync(filePath + '.html')) {
+      filePath += '.html';
+    } else {
+      res.writeHead(404, { 'Content-Type': 'text/plain' });
+      res.end('Not found');
+      return;
+    }
+  }
+  const ext = extname(filePath);
+  const contentType = MIME_TYPES[ext] || 'application/octet-stream';
+  try {
+    const content = readFileSync(filePath);
+    res.writeHead(200, { 'Content-Type': contentType });
+    res.end(content);
+  } catch (e) {
+    res.writeHead(500, { 'Content-Type': 'text/plain' });
+    res.end('Server error');
+  }
+}
 
-wsServer.on('connection', (ws) => {
+const httpServer = createServer(serveStatic);
+const wss = new WebSocketServer({ server: httpServer });
+
+console.log(`[server] RIVALS combined server listening on :${PORT}`);
+
+wss.on('connection', (ws) => {
   console.log('[server] connection');
   ws.on('message', (raw) => {
     try {
@@ -529,7 +569,7 @@ wsServer.on('connection', (ws) => {
           }
           break;
         case 'vote_map':
-          if (roundState === ROUND_INTERMISSION && msg.map) {
+          if (roundState === 'INTERMISSION' && msg.map) {
             if (!votingPlayers.has(ws.playerId)) {
               votingPlayers.add(ws.playerId);
               const current = mapVotes.get(msg.map) || 0;
@@ -547,8 +587,8 @@ wsServer.on('connection', (ws) => {
       players.delete(ws.playerId);
       scores.delete(ws.playerId);
       console.log(`[server] player left: ${ws.playerId} (${players.size} total)`);
-      if (players.size < 2 && roundState !== ROUND_LOBBY) {
-        roundState = ROUND_LOBBY;
+      if (players.size < 2 && roundState !== 'LOBBY') {
+        roundState = 'LOBBY';
         console.log('[server] not enough players, back to LOBBY');
       }
     }
@@ -559,7 +599,9 @@ wsServer.on('connection', (ws) => {
 // ----------------------------------------------------------------- Tick loop
 setInterval(() => {
   simulate();
-  broadcastSnapshot(wsServer);
+  broadcastSnapshot();
 }, TICK_INTERVAL);
 
-console.log(`[server] simulation tick: ${NET.TICK_RATE} Hz (${TICK_INTERVAL} ms)`);
+httpServer.listen(PORT, () => {
+  console.log(`[server] HTTP + WebSocket listening on :${PORT}`);
+});
