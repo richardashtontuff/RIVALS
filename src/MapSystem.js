@@ -380,3 +380,38 @@ function raycasterHitBox(origin, dir, box, out) {
   out.set(origin.x + dir.x * tmin, origin.y + dir.y * tmin, origin.z + dir.z * tmin);
   return box.containsPoint(out);
 }
+
+/** Build a reference-informed map from the shared server/client layout. */
+export function buildAuthoredMap(layout, world) {
+  const floor = new THREE.Mesh(new THREE.PlaneGeometry(120, 120), new THREE.MeshStandardMaterial({ color: layout.floor, roughness: .9 }));
+  floor.rotation.x = -Math.PI / 2;
+  floor.name = 'map_floor';
+  world.add(floor);
+  const materials = new Map();
+  function material(color, glowing) {
+    const key = `${color}:${glowing}`;
+    if (!materials.has(key)) materials.set(key, glowing
+      ? new THREE.MeshBasicMaterial({ color })
+      : new THREE.MeshStandardMaterial({ color, roughness: .8 }));
+    return materials.get(key);
+  }
+  for (const b of [...layout.solids, ...layout.details]) {
+    let geometry;
+    if (b.shape === 'cylinder') geometry = new THREE.CylinderGeometry(b.w / 2, b.w / 2, b.h, 20);
+    else if (b.shape === 'sphere') geometry = new THREE.SphereGeometry(b.w / 2, 16, 10);
+    else geometry = new THREE.BoxGeometry(b.w, b.h, b.d);
+    const mesh = new THREE.Mesh(geometry, material(b.color, b.name === 'lava' || b.name === 'ceiling_light'));
+    mesh.position.set(b.x, b.y, b.z);
+    mesh.name = b.name;
+    mesh.userData.isDecoration = layout.details.includes(b);
+    if (b.name === 'ceiling' || b.name === 'ceiling_light') mesh.userData.hideInMapPreview = true;
+    world.add(mesh);
+  }
+  if (layout.name.includes('Arena')) {
+    const grid = new THREE.GridHelper(118, 26, 0x9baab6, 0xb3c0c9);
+    grid.position.y = .012;
+    grid.name = 'arena_grid';
+    world.add(grid);
+  }
+  return { name: layout.name, metadata: MAP_METADATA[layout.name], mechanics: { lava: [], windows: [], bridge: null, scanner: null, shovels: [] } };
+}

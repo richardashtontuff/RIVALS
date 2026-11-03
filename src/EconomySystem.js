@@ -122,20 +122,18 @@ export function isFreeTrialActive(player, weaponKey) {
 export function canUseWeapon(player, weaponKey) {
   const w = W[weaponKey];
   if (!w) return { allowed: false, reason: 'unknown weapon' };
+  // Starter/previously owned weapons remain usable even if a gate changes.
+  if (player.ownedWeapons && player.ownedWeapons.has(weaponKey)) {
+    return { allowed: true };
+  }
   const gate = LEVEL_GATES[weaponKey];
   if (gate && player.level < gate) {
     return { allowed: false, reason: `requires Level ${gate}` };
   }
-  if (player.ownedWeapons && player.ownedWeapons.has(weaponKey)) {
-    return { allowed: true };
-  }
   if (isFreeTrialActive(player, weaponKey)) {
     return { allowed: true };
   }
-  if (w.cost > 0 && player.keys < w.cost) {
-    return { allowed: false, reason: `needs ${w.cost} keys` };
-  }
-  return { allowed: true };
+  return { allowed: false, reason: 'weapon not owned' };
 }
 
 /** Update contract progress for a weapon. */

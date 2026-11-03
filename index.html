@@ -42,12 +42,36 @@
   #ammo { font-variant-numeric: tabular-nums; font-size: 1.25rem; }
   #hp { opacity: 0.95; }
 </style>
+<link rel="stylesheet" href="/src/lobby.css">
 </head>
 <body>
+  <section id="lobby" aria-label="Game lobby">
+    <aside class="lobby-rail" aria-label="Lobby navigation">
+      <div class="lobby-mark" aria-label="RIVALS">R</div><div class="rail-line"></div>
+      <button class="rail-item active" id="navPlay"><span>◆</span>Play</button>
+      <button class="rail-item" id="navRange"><span>◎</span>Range</button>
+      <button class="rail-item" id="navMaps"><span>▦</span>Maps</button>
+      <button class="rail-item" id="navSettings"><span>⚙</span>Settings</button>
+    </aside>
+    <main class="lobby-main">
+      <header class="lobby-top"><div class="lobby-brand">RIVALS <span style="color:#8995a2;font-size:10px">/ WEB EDITION</span></div><div class="lobby-top-right"><span><i class="status-dot"></i><span id="lobbyConnection">CONNECTING</span></span><span id="lobbyPlayers">— ONLINE</span></div></header>
+      <div class="lobby-content">
+        <div class="eyebrow">Your next match starts here</div>
+        <h1>READY.<br><em>SET.</em> RIVAL.</h1>
+        <p class="lobby-desc">Find an opponent, vote for your arena, and go head to head. Or warm up your aim in the shooting range.</p>
+        <div class="mode-panel"><div class="mode-icon">✦</div><div><div class="mode-label">Selected playlist</div><div class="mode-title">1v1 DUEL</div></div><div class="mode-note">FIRST TO 5 ROUNDS</div></div>
+        <div class="lobby-actions"><button class="lobby-button" id="queueButton" disabled>CONNECTING...</button><button class="lobby-button secondary" id="rangeButton">◎ &nbsp; SHOOTING RANGE</button></div>
+        <div id="queueStatus" role="status">Connecting to the game server…</div>
+      </div>
+      <footer class="lobby-bottom"><div><strong>Make every shot count</strong>WASD to move &nbsp;·&nbsp; Space to jump &nbsp;·&nbsp; 1–4 to switch</div><div class="build-tag"><strong>PROTOTYPE BUILD</strong>MAPS &amp; MODES IN DEVELOPMENT</div></footer>
+    </main>
+  </section>
+  <section id="mapBrowser" aria-label="Map gallery"><div class="map-browser-header"><div><div class="eyebrow">Know your battleground</div><h2>MAP GALLERY</h2><p>Explore a prototype map solo or vote when a match is found.</p></div><button class="lobby-button secondary" id="closeMaps">BACK TO LOBBY</button></div><div id="mapGallery"></div></section>
+  <button id="returnLobby">← RETURN TO LOBBY</button>
   <div id="canvas"></div>
-  <div id="crosshair"><div class="dot"></div></div>
-  <div id="lock">CLICK TO PLAY • WASD to move • SHIFT sprint • C to slide • SPACE jump • Q dash • R reload • 1 rifle / 3 fists</div>
-  <div id="hud"><div id="ammo">20 / 100</div><div id="hp">HP 100</div></div>
+  <div id="crosshair"><div class="dot"></div><div id="hitmarker" aria-hidden="true">×</div></div>
+  <div id="lock">CLICK TO LOCK MOUSE</div>
+  <div id="hud"><div id="ammo">20 / 100</div><div id="hp">HP 150</div></div>
 
   <!-- Kill feed (top-right, spec §8.4) -->
   <div id="killfeed" style="
@@ -58,8 +82,8 @@
 
   <!-- Key balance (top, spec §8.4) -->
   <div id="keybalance" style="
-    position:absolute; top:10px; left:50%; transform:translateX(-50%);
-    color:#44ff44; font-size:0.9rem; pointer-events:none; user-select:none;
+    position:absolute; bottom:90px; left:26px;
+    color:#f3b44b; font-size:0.9rem; pointer-events:none; user-select:none;
     text-shadow:0 0 6px rgba(0,0,0,0.8); font-weight:700; display:none;">
     Keys: <span id="keycount">0</span>
   </div>
@@ -77,7 +101,7 @@
       </div>
       <div style="margin:1rem 0;">
         <label style="display:block;margin-bottom:0.5rem;color:#aaa">Mouse Sensitivity</label>
-        <input type="range" id="setSens" min="1" max="10" step="0.1" style="width:100%">
+        <input type="range" id="setSens" min="0.1" max="10" step="0.1" style="width:100%">
       </div>
       <div style="margin:1rem 0;">
         <label style="display:block;margin-bottom:0.5rem;color:#aaa">Crosshair Dot Color</label>

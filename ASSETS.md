@@ -41,3 +41,11 @@ to <10k polygons → gltf-transform → verify free-tier license before shipping
   GLB assets are NOT vendored in this repo. Placeholder procedural geometry
   is used in `src/MapSystem.js` until assets are obtained and optimized.
 - All assets must be < 10 MB and load < 2 s (success criterion #12).
+
+## Map vote previews
+`assets/maps/*.jpg` are 480×270 renders of this project's hand-authored
+procedural blockouts, not Roblox screenshots or licensed Roblox art. Each map
+now has a distinct layout and matching preview, but these are simplified
+approximations rather than finished replicas. See `MAP_REFERENCES.md` for
+sources and current limitations. The vote UI falls back to a neutral
+background if an image is missing.
