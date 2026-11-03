@@ -7,14 +7,14 @@
  */
 import { CONFIG } from './config.js';
 
-const CATEGORIES = ['primary', 'secondary', 'melee', 'utility'];
+const CATEGORIES = ['Primary', 'Secondary', 'Melee', 'Utility'];
 
 /** The free starter kit (spec §4.1). */
 export const STARTER_LOADOUT = {
-  primary: 'ASSAULT_RIFLE',
-  secondary: 'HANDGUN',
-  melee: 'FISTS',
-  utility: 'GRENADE',
+  Primary: 'ASSAULT_RIFLE',
+  Secondary: 'HANDGUN',
+  Melee: 'FISTS',
+  Utility: 'GRENADE',
 };
 
 /**

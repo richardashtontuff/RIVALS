@@ -489,7 +489,7 @@ function ammoFor(key) {
   return ammoState[key];
 }
 function currentWeaponKey() {
-  const slots = { 1: 'primary', 2: 'secondary', 3: 'melee', 4: 'utility' };
+  const slots = { 1: 'Primary', 2: 'Secondary', 3: 'Melee', 4: 'Utility' };
   return loadout[slots[currentSlot]];
 }
 function currentWeapon() { return W[currentWeaponKey()]; }
@@ -515,7 +515,7 @@ function setSlot(slot) {
     `<div style="opacity:0.7">${w2.category} • ${w2.tier}</div>`;
 }
 function updateSlotsUI() {
-  const slots = { 1: 'primary', 2: 'secondary', 3: 'melee', 4: 'utility' };
+  const slots = { 1: 'Primary', 2: 'Secondary', 3: 'Melee', 4: 'Utility' };
   slotLabels.innerHTML = Object.entries(slots).map(([num, cat]) => {
     const key = loadout[cat];
     const w = W[key];
